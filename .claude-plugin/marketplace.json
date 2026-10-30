@@ -5,7 +5,7 @@
     {
       "name": "shell-watch",
       "source": "./",
-      "description": "Live pane of the shells Claude runs plus subscription limits, context and cost"
+      "description": "Live pane of the shells and subagents Claude runs, plus subscription limits (5h, 7d, per-model week) with pace and projection, context, cost and token rate"
     }
   ]
 }

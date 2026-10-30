@@ -1,6 +1,6 @@
 {
   "name": "shell-watch",
-  "version": "0.8.2",
-  "description": "Live pane of the shells Claude runs (output streaming) plus subscription limits, context and cost",
+  "version": "0.8.3",
+  "description": "Live pane of the shells and subagents Claude runs, plus subscription limits (5h, 7d, per-model week) with pace and projection, context, cost and token rate",
   "types": "./types/index.d.ts"
 }
