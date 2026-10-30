@@ -1,0 +1,6 @@
+{
+  "name": "shell-watch",
+  "version": "0.5.3",
+  "description": "Live pane of the shells Claude runs (output streaming) plus subscription limits, context and cost",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "shell-watch",
+  "owner": { "name": "ziedBennour" },
+  "plugins": [
+    {
+      "name": "shell-watch",
+      "source": "./",
+      "description": "Live pane of the shells Claude runs plus subscription limits, context and cost"
+    }
+  ]
+}
