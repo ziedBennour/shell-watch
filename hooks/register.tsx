@@ -1,24 +1,37 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Limit, Shell, ShellFilter, ShellStatus, Usage } from '../types'
+import type { AgentRun, AgentRunStatus, Limit, Pace, Shell, ShellFilter, ShellStatus, Tokens, Usage } from '../types'
 import { GLYPH_W, bigRows, mix } from './bigfont'
 
 // shell-watch: a pane that streams the output of every Bash command Claude
-// runs (foreground and background), plus subscription limits, context and
-// cost. The same figures sit in the status line.
+// runs (foreground and background), the subagents at work, plus
+// subscription limits, context and cost.
 //
 // Claude Code writes each running command's output to
 // <tmp>/claude-<uid>/<project>/<session>/tasks/<id>.output; a timer tails
 // those files. A foreground file is deleted when the command ends, so the
 // final output comes from the tool result instead.
+//
+// Pace: each 5h / 7d reading is kept in $.store, a file under ~/.claude
+// shared by every session and project, so the pane can say how fast each
+// window fills (%/h) and when it would run out at that rate.
 
 const PANE = 'shell-watch'
 const TITLE = 'Shells & usage'
-const MAX_SHELLS = 30
+const MAX_SHELLS = 200
+const MAX_AGENTS = 50
 const TAIL_LINES = 60
 const TICK_MS = 1000
 const BIG_FILE = 256 * 1024
+
+const MIN = 60_000
+const HOUR = 60 * MIN
+const DAY = 24 * HOUR
+const HIST_KEY = 'pace-history-1'
+const HIST_KEEP = 8 * DAY
+const HIST_MAX = 6000
+const SYNC_MS = 30_000
 
 const shells = atom({ plugin: 'shell-watch', key: 'shells' } as const, [] as Shell[], { shape: 'shells-1' })
 const usage = atom({ plugin: 'shell-watch', key: 'usage' } as const, { at: 0, limits: [] } as Usage, {
@@ -29,6 +42,12 @@ const expanded = atom({ plugin: 'shell-watch', key: 'expanded' } as const, null 
 })
 // filter-2: the six filters; a value stored by 0.4.0 ('live', 'closed') reads as 'all'.
 const filter = atom({ plugin: 'shell-watch', key: 'filter' } as const, 'all' as ShellFilter, { shape: 'filter-2' })
+const tokens = atom(
+  { plugin: 'shell-watch', key: 'tokens' } as const,
+  { sid: '', since: 0, total: 0 } as Tokens,
+  { shape: 'tokens-2' },
+)
+const agents = atom({ plugin: 'shell-watch', key: 'agents' } as const, [] as AgentRun[], { shape: 'agents-1' })
 
 /** Whether a shell belongs to a filter. */
 const matches = (s: Shell, f: ShellFilter) =>
@@ -60,6 +79,16 @@ let dirCache: { sid: string; dir: string } | null = null
 // Effort of the last main-loop request; only `turn.step` carries it.
 let stepEffort: string | undefined
 const sizes = new Map<string, number>()
+
+// Readings of the rate-limit windows: [time, percent, resetsAt] per kind,
+// mirrored from $.store and merged with it every SYNC_MS.
+type Sample = [t: number, p: number, r: number]
+let hist: Record<string, Sample[]> | null = null
+let histDirty = false
+let histSyncedAt = 0
+let histFailed = false
+// This session's last reading per kind: only a change is a new reading.
+const seen = new Map<string, string>()
 
 const isLive = (s: Shell) => s.status === 'running' || s.status === 'background'
 
@@ -151,12 +180,9 @@ const fmtReset = (iso: string | undefined, now: number) => {
   if (!iso) return ''
   const t = Date.parse(iso)
   if (Number.isNaN(t)) return ''
-  const d = new Date(t)
-  const hm = `${two(d.getHours())}:${two(d.getMinutes())}`
   const left = t - now
   if (left <= 0) return 'reset imminent'
-  if (left < 24 * 3600_000) return `reset ${hm} (dans ${fmtDur(left)})`
-  return `reset ${DAYS[d.getDay()]} ${hm}`
+  return `reset dans ${fmtIn(left)} (${fmtAt(t, now)})`
 }
 
 const kindLabel = (kind: string) =>
@@ -194,6 +220,32 @@ const barParts = (pct: number, width: number) => {
 
 const fmtTokens = (n: number) =>
   n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
+
+/** French decimals: 2,4 */
+const fr = (n: number, digits: number) => n.toFixed(digits).replace('.', ',')
+
+/** A rate in %/h: "0,6", "18" */
+const fmtRate = (n: number) => fr(n, n < 10 ? 1 : 0)
+
+/** A token count with one decimal under 10k: "850", "2,4k", "31k", "1,2M" */
+const fmtTok = (n: number) =>
+  n >= 1_000_000 ? `${fr(n / 1_000_000, 1)}M` : n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${fr(n / 1000, 1)}k` : String(Math.round(n))
+
+/** A time ahead: "15:40" today, "jeu. 14:00" later */
+const fmtAt = (t: number, now: number) => {
+  const d = new Date(t)
+  const hm = `${two(d.getHours())}:${two(d.getMinutes())}`
+  return new Date(now).toDateString() === d.toDateString() ? hm : `${DAYS[d.getDay()]} ${hm}`
+}
+
+/** A delay ahead: "45 min", "2h30", "3j 2h" */
+const fmtIn = (ms: number) => {
+  const m = Math.max(0, Math.round(ms / MIN))
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h${two(m % 60)}`
+  return `${Math.floor(h / 24)}j ${h % 24}h`
+}
 
 // --- where the output files are ----------------------------------------------
 
@@ -241,12 +293,145 @@ async function tasksDir($: EngineInterface): Promise<string | null> {
   return null
 }
 
+// --- pace ----------------------------------------------------------------------
+
+/** Length of a rate-limit window; 0 for one without a fixed length (spend_limit). */
+const windowMs = (kind: string) => (kind.startsWith('five_hour') ? 5 * HOUR : kind.startsWith('seven_day') ? 7 * DAY : 0)
+
+/** The recent span a rate is read over, and the shortest that gives one. */
+const lookback = (kind: string) =>
+  kind.startsWith('five_hour') ? { span: 30 * MIN, min: 10 * MIN } : { span: DAY, min: 2 * HOUR }
+
+/** Which window a reading belongs to: its reset time, to 10 minutes. */
+const winOf = (r: number) => Math.round(r / (10 * MIN))
+
+const cleanHist = (v: unknown): Record<string, Sample[]> => {
+  const out: Record<string, Sample[]> = {}
+  if (v === null || typeof v !== 'object') return out
+  for (const [k, arr] of Object.entries(v as Record<string, unknown>)) {
+    if (!Array.isArray(arr)) continue
+    out[k] = arr.filter(
+      (x): x is Sample => Array.isArray(x) && x.length === 3 && x.every(n => typeof n === 'number' && Number.isFinite(n)),
+    )
+  }
+  return out
+}
+
+/**
+ * Two sets of readings as one, oldest first. Within a window the % only
+ * rises, so an equal reading adds nothing and a lower one is stale (a
+ * session that has not asked the API for a while).
+ */
+const mergeSamples = (a: Sample[], b: Sample[], since: number): Sample[] => {
+  const all = [...a, ...b].filter(x => x[0] >= since).sort((x, y) => x[0] - y[0] || x[1] - y[1])
+  const top = new Map<number, number>()
+  const out: Sample[] = []
+  for (const x of all) {
+    const w = winOf(x[2])
+    const max = top.get(w)
+    if (max !== undefined && x[1] <= max) continue
+    top.set(w, x[1])
+    out.push(x)
+  }
+  return out.slice(-HIST_MAX)
+}
+
+/** Reads the shared history, merges this session's readings in, writes it back when they are new. */
+async function syncHist($: EngineInterface, now: number) {
+  histSyncedAt = now
+  const stored = cleanHist(await $.store.get(HIST_KEY))
+  const mine = hist ?? {}
+  const out: Record<string, Sample[]> = {}
+  for (const k of new Set([...Object.keys(stored), ...Object.keys(mine)])) {
+    out[k] = mergeSamples(stored[k] ?? [], mine[k] ?? [], now - HIST_KEEP)
+  }
+  hist = out
+  if (histDirty) {
+    await $.store.set(HIST_KEY, out)
+    histDirty = false
+  }
+}
+
+/** Adds this session's new readings to the history and returns it. */
+async function recordReadings($: EngineInterface, limits: Limit[], now: number) {
+  if (!hist || now - histSyncedAt >= SYNC_MS) await syncHist($, now)
+  const h = hist ?? {}
+  for (const l of limits) {
+    const r = l.resetsAt ? Date.parse(l.resetsAt) : NaN
+    if (!windowMs(l.kind) || Number.isNaN(r)) continue
+    const key = `${l.percent}@${r}`
+    if (seen.get(l.kind) === key) continue
+    seen.set(l.kind, key)
+    h[l.kind] = mergeSamples(h[l.kind] ?? [], [[now, l.percent, r]], now - HIST_KEEP)
+    histDirty = true
+  }
+  hist = h
+  return h
+}
+
+/**
+ * How fast a window fills: the % gained over the recent span (30 min for
+ * 5h, 24 h for 7d), else over the window so far, which began at 0 %.
+ * Then when it reaches 100 % at that rate, or what it stands at on reset.
+ */
+const paceOf = (l: Limit, samples: Sample[], now: number): Pace | undefined => {
+  const len = windowMs(l.kind)
+  const reset = l.resetsAt ? Date.parse(l.resetsAt) : NaN
+  if (!len || Number.isNaN(reset) || reset <= now) return undefined
+  const start = reset - len
+  const pts = samples.filter(x => winOf(x[2]) === winOf(reset) && x[0] >= start - 10 * MIN && x[0] <= now)
+  // Another session may have read a higher % since this one's last request.
+  const cur = Math.max(l.percent, ...pts.map(x => x[1]))
+  const sustain = Math.max(0, (100 - cur) / ((reset - now) / HOUR))
+  if (cur >= 100) return { rate: 0, sustain: 0, hitAt: now }
+
+  const { span: want, min } = lookback(l.kind)
+  // The reading that stood `want` ago; else the window's start; else the
+  // oldest reading kept, when history began inside the span.
+  const before = [...pts].reverse().find(x => x[0] <= now - want)
+  const oldest = pts[0]
+  const base: [number, number] = before
+    ? [now - want, before[1]]
+    : start > now - want || !oldest || now - oldest[0] < min
+      ? [start, 0]
+      : [oldest[0], oldest[1]]
+  const span = now - base[0]
+  if (span < min) return { sustain }
+  const rate = Math.max(0, (cur - base[1]) / (span / HOUR))
+  const hit = rate > 0 ? now + ((100 - cur) / rate) * HOUR : Infinity
+  return hit < reset
+    ? { rate, span, sustain, hitAt: hit }
+    : { rate, span, sustain, atReset: Math.min(100, cur + (rate * (reset - now)) / HOUR) }
+}
+
+/** Counts a model request's tokens: new input, cache writes and output; cache reads are left out. */
+async function addTokens($: EngineInterface, n: number) {
+  if (!(n > 0)) return
+  const now = await $.clock.now()
+  await update($, tokens, t => ({
+    ...t,
+    since: t.since || now,
+    total: t.total + n,
+  }))
+}
+
 // --- usage -------------------------------------------------------------------
 
 async function refreshUsage($: EngineInterface) {
   const u = await $.session.usage()
   const now = await $.clock.now()
   const limits: Limit[] = u.rateLimits.map(l => clean({ kind: l.kind, percent: l.percentUsed, resetsAt: l.resetsAt }))
+  // The history is a bonus: a store that fails leaves the meters and shells alone.
+  const h = await recordReadings($, limits, now).catch((err: unknown) => {
+    if (!histFailed) $.ui.log(`shell-watch: pace history: ${String(err)}`)
+    histFailed = true
+    return hist ?? {}
+  })
+  const pace: Record<string, Pace> = {}
+  for (const l of limits) {
+    const p = paceOf(l, h[l.kind] ?? [], now)
+    if (p) pace[l.kind] = clean(p)
+  }
   const prev = await read($, usage)
   const model = await $.session.model().catch(() => '')
   const next: Usage = {
@@ -259,6 +444,7 @@ async function refreshUsage($: EngineInterface) {
     ctxWindow: u.context.window,
     usd: u.cost?.usd,
     limits,
+    pace,
   }
   await update($, usage, () => clean(next))
 }
@@ -288,6 +474,7 @@ async function tick($: EngineInterface) {
   busy = true
   try {
     await refreshUsage($)
+    await refreshAgents($).catch(() => undefined)
     const list = await read($, shells)
     const live = list.filter(isLive)
     if (live.length === 0) return
@@ -410,6 +597,59 @@ async function onNotification($: EngineInterface, text: string) {
   )
 }
 
+// --- agents ----------------------------------------------------------------------
+
+const AGENT_DONE: readonly AgentRunStatus[] = ['completed', 'failed', 'killed']
+const isAgentLive = (a: AgentRun) => !AGENT_DONE.includes(a.status)
+
+const putAgents = ($: EngineInterface, fn: (list: AgentRun[]) => AgentRun[]) =>
+  update($, agents, list => fn(list).map(clean))
+
+/** A tool call in a few words: "Bash · npm test", "Read · register.tsx". */
+const activityOf = (e: Record<string, unknown>) => {
+  const tool = str(e.tool)
+  const get = (k: string) => (str(e[k]).split('\n')[0] ?? '').trim()
+  const base = (path: string) => path.split(/[\\/]/).pop() ?? path
+  const what =
+    tool === 'Bash'
+      ? get('description') || get('command')
+      : tool === 'Read' || tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit'
+        ? base(get('file_path') || get('notebook_path'))
+        : tool === 'Grep' || tool === 'Glob'
+          ? get('pattern')
+          : tool === 'WebFetch'
+            ? get('url')
+            : tool === 'WebSearch'
+              ? get('query')
+              : tool === 'Agent'
+                ? get('description')
+                : ''
+  return what ? `${tool} · ${what}` : tool
+}
+
+/** Brings the running agents' status up to date from the engine's list. */
+async function refreshAgents($: EngineInterface) {
+  const list = await read($, agents)
+  if (!list.some(isAgentLive)) return
+  const infos = new Map((await $.agent.list()).map(i => [i.id, i]))
+  const now = await $.clock.now()
+  const next = new Map<string, AgentRunStatus>()
+  for (const a of list) {
+    if (!isAgentLive(a)) continue
+    // An agent the engine no longer lists has ended.
+    const status = infos.get(a.id)?.status ?? (now - a.startedAt > 5000 ? 'completed' : a.status)
+    if (status !== a.status) next.set(a.id, status)
+  }
+  if (next.size === 0) return
+  await putAgents($, cur =>
+    cur.map(a => {
+      const status = next.get(a.id)
+      if (!status || !isAgentLive(a)) return a
+      return { ...a, status, endedAt: AGENT_DONE.includes(status) ? now : undefined }
+    }),
+  )
+}
+
 // --- the module -----------------------------------------------------------------
 
 export const register: Register = on => {
@@ -419,6 +659,12 @@ export const register: Register = on => {
       description: 'Open the live shells & subscription usage pane',
     })
     ensureTimer($)
+    // A new session id (startup, /clear, resume) counts its tokens from zero.
+    await safe($, async () => {
+      const sid = await $.session.id()
+      const now = await $.clock.now()
+      await update($, tokens, t => (t.sid === sid ? t : { sid, since: now, total: 0 }))
+    })
     // No status-line entry any more: clear the one an earlier version left.
     $.ui.status(undefined)
     void $.ui.open({ id: PANE, title: TITLE, backgroundColor: C.base })
@@ -428,6 +674,7 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     timer?.cancel()
     timer = null
+    if (histDirty) await safe($, async () => syncHist($, await $.clock.now()))
     return next(e)
   })
 
@@ -458,11 +705,63 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // Each model request of the main loop says which effort it asks for.
-  // Pass-through: read the input, forward the stream untouched.
+  // A subagent starting: what it was asked, its type and model.
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    const id = r.agentId
+    if (id) {
+      await safe($, async () => {
+        ensureTimer($)
+        const now = await $.clock.now()
+        const run: AgentRun = {
+          id,
+          description: e.description,
+          type: e.subagentType,
+          model: r.model,
+          background: e.background,
+          parentId: e.parentAgentId,
+          startedAt: now,
+          status: 'running',
+          tools: 0,
+          tokens: 0,
+        }
+        await putAgents($, list => [...list.filter(a => a.id !== id), run].slice(-MAX_AGENTS))
+      })
+    }
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // Each tool call a subagent makes: counted, and shown as its last activity.
+  on('tool.call', async ($, e, next) => {
+    const id = e.agentId
+    if (id) {
+      const last = activityOf(e as unknown as Record<string, unknown>)
+      await safe($, () => putAgents($, list => list.map(a => (a.id === id ? { ...a, tools: a.tools + 1, last } : a))))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // Each model request of the main loop says which effort it asks for, and
+  // each response (subagents' too) how many tokens it used.
+  // Pass-through: the stream is forwarded untouched.
   on('turn.step', async function* ($, e, next) {
     if (e.agentId === undefined && e.effort !== undefined) stepEffort = String(e.effort)
-    return yield* next(e)
+    const agentId = e.agentId
+    if (agentId !== undefined && e.effort !== undefined) {
+      const effort = String(e.effort)
+      await safe($, () =>
+        putAgents($, list => list.map(a => (a.id === agentId && a.effort !== effort ? { ...a, effort } : a))),
+      )
+    }
+    const r = yield* next(e)
+    const t = r.usage
+    if (t) {
+      const n = t.input_tokens + t.cache_creation_input_tokens + t.output_tokens
+      await safe($, () => addTokens($, n))
+      const id = e.agentId
+      if (id) await safe($, () => putAgents($, list => list.map(a => (a.id === id ? { ...a, tokens: a.tokens + n } : a))))
+    }
+    return r
   })
 
   on('session.append', async ($, e, next) => {
@@ -482,10 +781,15 @@ export const register: Register = on => {
     const list = await read($, shells)
     const open = await read($, expanded)
     const view = await read($, filter)
+    const tok = await read($, tokens)
+    const runs = await read($, agents)
     const width = Math.max(30, (e.props.bodyColumns || e.viewport?.columns || 80) - 2)
     const inner = width - 2
-    const barW = Math.max(8, Math.min(28, inner - 36))
+    // The bar gives room to the reset and the pace after it.
+    const barW = Math.max(8, Math.min(28, inner - 60))
     const now = u.at || Date.now()
+    // Tokens per minute over the session (cache reads left out).
+    const tokAvg = tok.since && now - tok.since >= MIN ? tok.total / ((now - tok.since) / MIN) : undefined
 
     // Project name in big letters, with a mauve → blue gradient.
     const root = await $.session.root().catch(() => '')
@@ -530,6 +834,26 @@ export const register: Register = on => {
             {`${Math.round(pct)}%`.padStart(4)}
           </Text>
           <Text color={C.dim}> {note}</Text>
+        </Text>
+      )
+    }
+
+    // After a window's reset: its rate (dim, peach near the pace that just
+    // lasts until the reset, red past it), then the % it ends at, or when
+    // it runs out first.
+    const paceTag = (l: Limit) => {
+      const p = u.pace?.[l.kind]
+      if (!p || p.rate === undefined || l.percent >= 100) return ''
+      const hot = p.rate > p.sustain ? C.red : p.rate > p.sustain * 0.8 ? C.accent : C.dim
+      return (
+        <Text>
+          <Text color={C.dim}>{' · '}</Text>
+          <Text color={hot}>{`${fmtRate(p.rate)}%/h`}</Text>
+          {p.hitAt !== undefined ? (
+            <Text color={C.red}>{` → limite dans ${fmtIn(p.hitAt - now)} (${fmtAt(p.hitAt, now)})`}</Text>
+          ) : (
+            <Text color={C.dim}>{` → ${Math.round(p.atReset ?? 0)}%`}</Text>
+          )}
         </Text>
       )
     }
@@ -671,15 +995,24 @@ export const register: Register = on => {
           {[
             ...(u.limits.length === 0
               ? [<Text key="no-limits" color={C.dim}>Limites inconnues (attend la prochaine réponse de l'API)</Text>]
-              : u.limits.map(l => meter(kindLabel(l.kind), l.percent, level(l.percent), fmtReset(l.resetsAt, now)))),
+              : u.limits.map(l => (
+                  <Text key={`lim-${l.kind}`}>
+                    {meter(kindLabel(l.kind), l.percent, level(l.percent), fmtReset(l.resetsAt, now))}
+                    {paceTag(l)}
+                  </Text>
+                ))),
             ...(u.ctxPercent !== undefined
               ? [
-                  meter(
-                    'ctx',
-                    u.ctxPercent,
-                    u.ctxPercent >= 50 ? level(u.ctxPercent) : C.text,
-                    `${u.ctxTokens !== undefined ? fmtTokens(u.ctxTokens) : '?'} / ${u.ctxWindow ? fmtTokens(u.ctxWindow) : '?'}`,
-                  ),
+                  // an extra blank line sets the limits apart from the session's figures
+                  <Box key="ctx" flexDirection="column">
+                    <Text> </Text>
+                    {meter(
+                      'ctx',
+                      u.ctxPercent,
+                      u.ctxPercent >= 50 ? level(u.ctxPercent) : C.text,
+                      `${u.ctxTokens !== undefined ? fmtTokens(u.ctxTokens) : '?'} / ${u.ctxWindow ? fmtTokens(u.ctxWindow) : '?'}`,
+                    )}
+                  </Box>,
                 ]
               : []),
             ...(u.usd !== undefined
@@ -689,12 +1022,106 @@ export const register: Register = on => {
                     <Text color={C.accent} bold>
                       ${u.usd.toFixed(2)}
                     </Text>
-                    <Text color={C.dim}> cette session (équivalent API)</Text>
+                    {u.startedAt && now - u.startedAt >= 5 * MIN ? (
+                      <Text color={C.dim}>{` · ${fr(u.usd / ((now - u.startedAt) / HOUR), 2)} $/h`}</Text>
+                    ) : (
+                      ''
+                    )}
+                    {tokAvg !== undefined ? <Text color={C.dim}>{` · ${fmtTok(tokAvg)} tok/min`}</Text> : ''}
                   </Text>,
                 ]
               : []),
           ].flatMap((el, i) => [<Text key={`gap-${i}`}> </Text>, el])}
         </Box>
+
+        {(() => {
+          // Shown once the session has started an agent; ended ones stay.
+          const shown = runs
+          if (shown.length === 0) return null
+          const nLive = shown.filter(isAgentLive).length
+          const nDone = shown.length - nLive
+          // Running ones first (oldest first), then ended ones (latest first);
+          // children under their parent.
+          const roots = shown.filter(a => !a.parentId || !shown.some(b => b.id === a.parentId))
+          const ordered: { a: AgentRun; depth: number }[] = []
+          const walk = (a: AgentRun, depth: number) => {
+            ordered.push({ a, depth })
+            for (const c of shown.filter(b => b.parentId === a.id).sort((x, y) => x.startedAt - y.startedAt)) walk(c, depth + 1)
+          }
+          const liveRoots = roots.filter(isAgentLive).sort((x, y) => x.startedAt - y.startedAt)
+          const doneRoots = roots.filter(a => !isAgentLive(a)).sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))
+          for (const a of [...liveRoots, ...doneRoots]) walk(a, 0)
+          const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, Math.max(1, n - 1))}…` : t)
+          return (
+            <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1} marginBottom={1}>
+              <Text>
+                <Text color={C.accent} bold>
+                  Agents
+                </Text>
+                <Text color={C.dim}>
+                  {`  ${nLive > 0 ? `${nLive} en cours` : ''}${nLive > 0 && nDone > 0 ? ' · ' : ''}${nDone > 0 ? `${nDone} terminé${nDone > 1 ? 's' : ''}` : ''}`}
+                </Text>
+              </Text>
+              {ordered.map(({ a, depth }) => {
+                const isOn = isAgentLive(a)
+                const glyph = isOn ? spin : a.status === 'completed' ? '✓' : a.status === 'killed' ? '■' : '✗'
+                const color = isOn
+                  ? C.accent
+                  : a.status === 'completed'
+                    ? C.mint
+                    : a.status === 'killed'
+                      ? C.orange
+                      : C.red
+                const type = a.type === 'general-purpose' ? 'general' : (a.type.split(':').pop() ?? a.type)
+                const meta = [
+                  `${a.tools} outil${a.tools > 1 ? 's' : ''}`,
+                  `${fmtTok(a.tokens)} tok`,
+                  a.background ? 'bg' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+                // Model and effort first: "Haiku 4.5 high"
+                const model = a.model ? prettyModel(a.model) : '?'
+                const effort = a.effort ? (EFFORT[a.effort]?.label ?? a.effort) : ''
+                const head = `${model}${effort ? ` ${effort}` : ''}`
+                // Started → ended, or → +running time, as the shells show it.
+                const when = `${clock(a.startedAt)} → ${a.endedAt !== undefined ? clock(a.endedAt) : `+${fmtDur(now - a.startedAt)}`}`
+                const pad = '  '.repeat(depth)
+                const room = Math.max(8, inner - pad.length - head.length - when.length - type.length - 9)
+                const doing = a.status === 'waiting' ? 'en attente' : a.status === 'idle' ? 'inactif' : a.last
+                return (
+                  <Box key={`agent-${a.id}`} flexDirection="column" marginTop={1}>
+                    <Text wrap="truncate-end">
+                      <Text color={color} bold>{`${pad} ${glyph} `}</Text>
+                      <Text color={C.accent}>{model}</Text>
+                      {effort ? <Text color={C.sub}>{` ${effort}`}</Text> : ''}
+                      <Text color={C.sub}>{`  ${clock(a.startedAt)}`}</Text>
+                      <Text color={C.dim}> → </Text>
+                      {a.endedAt !== undefined ? (
+                        <Text color={C.sub}>{clock(a.endedAt)}</Text>
+                      ) : (
+                        <Text color={color}>{`+${fmtDur(now - a.startedAt)}`}</Text>
+                      )}
+                      <Text>{'  '}</Text>
+                      <Text color={isOn ? C.text : C.textSoft} bold>
+                        {cut(a.description, room)}
+                      </Text>
+                      <Text color={C.sub}>{`  ${type}`}</Text>
+                    </Text>
+                    <Text color={C.dim} wrap="truncate-end">
+                      {`${pad}   ${a.endedAt !== undefined ? `${fmtDur(a.endedAt - a.startedAt)} · ` : ''}${meta}`}
+                      {isOn && doing ? (
+                        <Text color={a.status === 'waiting' ? C.accent : C.dim}>{`  ↳ ${doing}`}</Text>
+                      ) : (
+                        ''
+                      )}
+                    </Text>
+                  </Box>
+                )
+              })}
+            </Box>
+          )
+        })()}
 
         <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1}>
           {/* Title + counters; each counter filters the list, a second click shows all. */}
@@ -742,7 +1169,7 @@ export const register: Register = on => {
                   ]
                 : []),
               ...liveShown.map(s => row(s, liveShown.length > 2 ? 6 : 12)),
-              ...endedShown.slice(0, 15).map(s => row(s, 20)),
+              ...endedShown.slice(0, 50).map(s => row(s, 20)),
               ...(endedShown.length > 0
                 ? [
                     <Text key="hint" color={C.dim} italic>
