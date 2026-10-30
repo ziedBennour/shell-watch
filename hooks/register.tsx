@@ -32,6 +32,7 @@ const HIST_KEY = 'pace-history-1'
 const HIST_KEEP = 8 * DAY
 const HIST_MAX = 6000
 const SYNC_MS = 30_000
+const USAGE_POLL = 5 * MIN
 
 const shells = atom({ plugin: 'shell-watch', key: 'shells' } as const, [] as Shell[], { shape: 'shells-1' })
 const usage = atom({ plugin: 'shell-watch', key: 'usage' } as const, { at: 0, limits: [] } as Usage, {
@@ -89,6 +90,11 @@ let histSyncedAt = 0
 let histFailed = false
 // This session's last reading per kind: only a change is a new reading.
 const seen = new Map<string, string>()
+// Windows only /usage shows (a model's own week, Fable's), read every USAGE_POLL.
+let extraLimits: Limit[] = []
+let usagePolledAt = 0
+let usagePolling = false
+let usageFailed = false
 
 const isLive = (s: Shell) => s.status === 'running' || s.status === 'background'
 
@@ -185,6 +191,8 @@ const fmtReset = (iso: string | undefined, now: number) => {
   return `reset dans ${fmtIn(left)} (${fmtAt(t, now)})`
 }
 
+const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1)
+
 const kindLabel = (kind: string) =>
   kind === 'five_hour'
     ? '5h'
@@ -192,7 +200,9 @@ const kindLabel = (kind: string) =>
       ? '7j'
       : kind === 'spend_limit'
         ? 'budget'
-        : kind.replace(/^seven_day_/, '7j ').replace(/^five_hour_/, '5h ').replace(/_/g, ' ')
+        : kind.startsWith('seven_day_')
+          ? cap(kind.slice('seven_day_'.length).replace(/_/g, ' '))
+          : kind.replace(/^five_hour_/, '5h ').replace(/_/g, ' ')
 
 // Vesper (the VS Code theme in use): near-black, white and greys,
 // a peach accent, mint for success, soft red for errors.
@@ -415,12 +425,80 @@ async function addTokens($: EngineInterface, n: number) {
   }))
 }
 
+// --- /usage ------------------------------------------------------------------
+//
+// The API reports two windows (5h, 7d all models); /usage also shows a
+// model's own week ("Current week (Fable): 17% used · resets Nov 1,
+// 8:59pm (UTC)"). A headless `claude -p /usage`, without plugins or a saved
+// session, reads it; no model request is made.
+
+const MONTHS_EN = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+/** "Nov 1, 8:59pm (UTC)" → ms; the year is the one that puts it nearest ahead. */
+const parseResets = (text: string, now: number): number | undefined => {
+  const m = /([A-Za-z]{3})[a-z]*\.? (\d{1,2}),? (\d{1,2})(?::(\d{2}))? ?([ap]m)?\s*(?:\(([^)]+)\))?/i.exec(text)
+  if (!m) return undefined
+  const mon = MONTHS_EN.indexOf((m[1] ?? '').toLowerCase())
+  if (mon < 0) return undefined
+  const day = Number(m[2])
+  let hour = Number(m[3])
+  const ap = (m[5] ?? '').toLowerCase()
+  if (ap === 'pm' && hour < 12) hour += 12
+  if (ap === 'am' && hour === 12) hour = 0
+  const min = Number(m[4] ?? 0)
+  // The CLI prints in this machine's zone, or says UTC.
+  const at = (y: number) =>
+    m[6] === 'UTC' ? Date.UTC(y, mon, day, hour, min) : new Date(y, mon, day, hour, min).getTime()
+  const year = new Date(now).getFullYear()
+  const t = at(year)
+  return t < now - 30 * DAY ? at(year + 1) : t
+}
+
+/** The model-specific weeks /usage lists, as limits `seven_day_<model>`. */
+const parseUsage = (text: string, now: number): Limit[] => {
+  const out: Limit[] = []
+  for (const m of text.matchAll(/^Current week \(([^)]+)\):\s*(\d+(?:\.\d+)?)% used(?:\s*·\s*resets (.+))?$/gim)) {
+    const name = (m[1] ?? '').trim().toLowerCase()
+    if (!name || name === 'all models') continue
+    const reset = m[3] ? parseResets(m[3], now) : undefined
+    out.push(
+      clean({
+        kind: `seven_day_${name.replace(/[^a-z0-9]+/g, '_')}`,
+        percent: Number(m[2]),
+        resetsAt: reset !== undefined ? new Date(reset).toISOString() : undefined,
+      }),
+    )
+  }
+  return out
+}
+
+/** Reads /usage in the background, at most every USAGE_POLL. */
+async function pollUsage($: EngineInterface, now: number) {
+  if (usagePolling || now - usagePolledAt < USAGE_POLL) return
+  usagePolling = true
+  usagePolledAt = now
+  try {
+    const r = await $.process.run(['claude', '-p', '--safe-mode', '--no-session-persistence', '/usage'], {
+      timeoutMs: 30_000,
+    })
+    if (r.exitCode === 0) extraLimits = parseUsage(r.stdout, now)
+  } catch (err) {
+    if (!usageFailed) $.ui.log(`shell-watch: /usage: ${String(err)}`)
+    usageFailed = true
+  } finally {
+    usagePolling = false
+  }
+}
+
 // --- usage -------------------------------------------------------------------
 
 async function refreshUsage($: EngineInterface) {
   const u = await $.session.usage()
   const now = await $.clock.now()
-  const limits: Limit[] = u.rateLimits.map(l => clean({ kind: l.kind, percent: l.percentUsed, resetsAt: l.resetsAt }))
+  const reported: Limit[] = u.rateLimits.map(l => clean({ kind: l.kind, percent: l.percentUsed, resetsAt: l.resetsAt }))
+  // Off the tick: the CLI takes a few seconds.
+  if (reported.length > 0) void pollUsage($, now)
+  const limits = [...reported, ...extraLimits.filter(x => !reported.some(l => l.kind === x.kind))]
   // The history is a bonus: a store that fails leaves the meters and shells alone.
   const h = await recordReadings($, limits, now).catch((err: unknown) => {
     if (!histFailed) $.ui.log(`shell-watch: pace history: ${String(err)}`)
