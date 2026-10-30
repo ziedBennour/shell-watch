@@ -1132,14 +1132,22 @@ export const register: Register = on => {
           const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, Math.max(1, n - 1))}…` : t)
           return (
             <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1} marginBottom={1}>
-              <Text>
-                <Text color={C.accent} bold>
-                  Agents
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text>
+                  <Text color={C.accent} bold>
+                    Agents
+                  </Text>
+                  <Text color={C.dim}>
+                    {`  ${nLive > 0 ? `${nLive} en cours` : ''}${nLive > 0 && nDone > 0 ? ' · ' : ''}${nDone > 0 ? `${nDone} terminé${nDone > 1 ? 's' : ''}` : ''}`}
+                  </Text>
                 </Text>
-                <Text color={C.dim}>
-                  {`  ${nLive > 0 ? `${nLive} en cours` : ''}${nLive > 0 && nDone > 0 ? ' · ' : ''}${nDone > 0 ? `${nDone} terminé${nDone > 1 ? 's' : ''}` : ''}`}
-                </Text>
-              </Text>
+                {/* Once every agent has ended: clears the list, and the section with it. */}
+                {nLive === 0 ? (
+                  <Button key="agents-clear" plain onPress={() => putAgents($, list => list.filter(isAgentLive))}>
+                    <Text color={C.dim}>x tout effacer</Text>
+                  </Button>
+                ) : null}
+              </Box>
               {ordered.map(({ a, depth }) => {
                 const isOn = isAgentLive(a)
                 const glyph = isOn ? spin : a.status === 'completed' ? '✓' : a.status === 'killed' ? '■' : '✗'
@@ -1165,10 +1173,12 @@ export const register: Register = on => {
                 // Started → ended, or → +running time, as the shells show it.
                 const when = `${clock(a.startedAt)} → ${a.endedAt !== undefined ? clock(a.endedAt) : `+${fmtDur(now - a.startedAt)}`}`
                 const pad = '  '.repeat(depth)
-                const room = Math.max(8, inner - pad.length - head.length - when.length - type.length - 9)
+                const room = Math.max(8, inner - pad.length - head.length - when.length - type.length - 11)
                 const doing = a.status === 'waiting' ? 'en attente' : a.status === 'idle' ? 'inactif' : a.last
                 return (
                   <Box key={`agent-${a.id}`} flexDirection="column" marginTop={1}>
+                    <Box flexDirection="row">
+                    <Box flexGrow={1} flexShrink={1}>
                     <Text wrap="truncate-end">
                       <Text color={color} bold>{`${pad} ${glyph} `}</Text>
                       <Text color={C.accent}>{model}</Text>
@@ -1186,6 +1196,18 @@ export const register: Register = on => {
                       </Text>
                       <Text color={C.sub}>{`  ${type}`}</Text>
                     </Text>
+                    </Box>
+                    {/* An ended agent can be taken off the list. */}
+                    {!isOn ? (
+                      <Button
+                        key={`agent-rm-${a.id}`}
+                        plain
+                        onPress={() => putAgents($, list => list.filter(x => x.id !== a.id))}
+                      >
+                        <Text color={C.dim}> x</Text>
+                      </Button>
+                    ) : null}
+                    </Box>
                     <Text color={C.dim} wrap="truncate-end">
                       {`${pad}   ${a.endedAt !== undefined ? `${fmtDur(a.endedAt - a.startedAt)} · ` : ''}${meta}`}
                       {isOn && doing ? (
