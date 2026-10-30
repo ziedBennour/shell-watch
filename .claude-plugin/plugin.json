@@ -1,6 +1,7 @@
 {
   "name": "shell-watch",
-  "version": "0.8.3",
+  "version": "0.8.4",
+  "license": "MIT",
   "description": "Live pane of the shells and subagents Claude runs, plus subscription limits (5h, 7d, per-model week) with pace and projection, context, cost and token rate",
   "types": "./types/index.d.ts"
 }

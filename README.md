@@ -134,3 +134,7 @@ claude plugin validate .
 - `hooks/register.tsx` : tout le mod (hooks, calculs, rendu du panneau).
 - `hooks/bigfont.ts` : les grandes lettres du nom de projet.
 - `types/index.d.ts` : le contrat des valeurs que le mod garde (`$.state`).
+
+## Licence
+
+[MIT](LICENSE)
