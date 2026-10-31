@@ -863,8 +863,9 @@ export const register: Register = on => {
     const runs = await read($, agents)
     const width = Math.max(30, (e.props.bodyColumns || e.viewport?.columns || 80) - 2)
     const inner = width - 2
-    // The bar gives room to the reset and the pace after it.
-    const barW = Math.max(8, Math.min(28, inner - 60))
+    // The reset and the pace sit on their own line, under the bar: the bar
+    // only shares its line with the label, the % and ctx's short note.
+    const barW = Math.max(8, Math.min(28, inner - 26))
     const now = u.at || Date.now()
     // Tokens per minute over the session (cache reads left out).
     const tokAvg = tok.since && now - tok.since >= MIN ? tok.total / ((now - tok.since) / MIN) : undefined
@@ -900,7 +901,7 @@ export const register: Register = on => {
       return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`
     }
 
-    const meter = (label: string, pct: number, color: string, note: string) => {
+    const meter = (label: string, pct: number, color: string, note?: string) => {
       const b = barParts(pct, barW)
       return (
         <Text key={`m-${label}`}>
@@ -911,7 +912,7 @@ export const register: Register = on => {
             {' '}
             {`${Math.round(pct)}%`.padStart(4)}
           </Text>
-          <Text color={C.dim}> {note}</Text>
+          {note ? <Text color={C.dim}> {note}</Text> : ''}
         </Text>
       )
     }
@@ -1074,10 +1075,15 @@ export const register: Register = on => {
             ...(u.limits.length === 0
               ? [<Text key="no-limits" color={C.dim}>Limites inconnues (attend la prochaine réponse de l'API)</Text>]
               : u.limits.map(l => (
-                  <Text key={`lim-${l.kind}`}>
-                    {meter(kindLabel(l.kind), l.percent, level(l.percent), fmtReset(l.resetsAt, now))}
-                    {paceTag(l)}
-                  </Text>
+                  // the bar, then its reset and pace on a line of their own
+                  <Box key={`lim-${l.kind}`} flexDirection="column">
+                    {meter(kindLabel(l.kind), l.percent, level(l.percent))}
+                    <Text>
+                      <Text>{' '.repeat(7)}</Text>
+                      <Text color={C.dim}>{fmtReset(l.resetsAt, now)}</Text>
+                      {paceTag(l)}
+                    </Text>
+                  </Box>
                 ))),
             ...(u.ctxPercent !== undefined
               ? [
