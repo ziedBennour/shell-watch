@@ -61,9 +61,9 @@ export type Limit = { kind: string; percent: number; resetsAt?: string }
 
 /** How fast a rate-limit window fills, read from the readings kept across sessions. */
 export type Pace = {
-  /** %/h over the recent span (or the window so far); absent while too early to measure */
+  /** %/h averaged since the window began; absent while too early to measure */
   rate?: number
-  /** ms the rate is measured over */
+  /** ms the rate is measured over: the window so far */
   span?: number
   /** %/h that would land exactly on 100 % at the reset */
   sustain: number

@@ -308,9 +308,8 @@ async function tasksDir($: EngineInterface): Promise<string | null> {
 /** Length of a rate-limit window; 0 for one without a fixed length (spend_limit). */
 const windowMs = (kind: string) => (kind.startsWith('five_hour') ? 5 * HOUR : kind.startsWith('seven_day') ? 7 * DAY : 0)
 
-/** The recent span a rate is read over, and the shortest that gives one. */
-const lookback = (kind: string) =>
-  kind.startsWith('five_hour') ? { span: 30 * MIN, min: 10 * MIN } : { span: DAY, min: 2 * HOUR }
+/** How much of a window must have passed before its rate means something. */
+const minSpan = (kind: string) => (kind.startsWith('five_hour') ? 10 * MIN : 2 * HOUR)
 
 /** Which window a reading belongs to: its reset time, to 10 minutes. */
 const winOf = (r: number) => Math.round(r / (10 * MIN))
@@ -380,8 +379,8 @@ async function recordReadings($: EngineInterface, limits: Limit[], now: number) 
 }
 
 /**
- * How fast a window fills: the % gained over the recent span (30 min for
- * 5h, 24 h for 7d), else over the window so far, which began at 0 %.
+ * How fast a window fills: its average since it began, at 0 %, so the
+ * whole window's use counts, not just the last hour.
  * Then when it reaches 100 % at that rate, or what it stands at on reset.
  */
 const paceOf = (l: Limit, samples: Sample[], now: number): Pace | undefined => {
@@ -395,19 +394,9 @@ const paceOf = (l: Limit, samples: Sample[], now: number): Pace | undefined => {
   const sustain = Math.max(0, (100 - cur) / ((reset - now) / HOUR))
   if (cur >= 100) return { rate: 0, sustain: 0, hitAt: now }
 
-  const { span: want, min } = lookback(l.kind)
-  // The reading that stood `want` ago; else the window's start; else the
-  // oldest reading kept, when history began inside the span.
-  const before = [...pts].reverse().find(x => x[0] <= now - want)
-  const oldest = pts[0]
-  const base: [number, number] = before
-    ? [now - want, before[1]]
-    : start > now - want || !oldest || now - oldest[0] < min
-      ? [start, 0]
-      : [oldest[0], oldest[1]]
-  const span = now - base[0]
-  if (span < min) return { sustain }
-  const rate = Math.max(0, (cur - base[1]) / (span / HOUR))
+  const span = now - start
+  if (span < minSpan(l.kind)) return { sustain }
+  const rate = cur / (span / HOUR)
   const hit = rate > 0 ? now + ((100 - cur) / rate) * HOUR : Infinity
   return hit < reset
     ? { rate, span, sustain, hitAt: hit }

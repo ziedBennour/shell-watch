@@ -61,9 +61,9 @@ coût   $3.10 · 2,58 $/h · 2,4k tok/min
 - **Fable** (ou un autre modèle) : la semaine propre à un modèle, quand ton abonnement en a
   une. L'API ne la donne pas : le mod la lit dans `/usage`, toutes les 5 minutes.
 - Après le reset, le **rythme** et la **projection** :
-  - `6%/h` : la vitesse à laquelle la fenêtre se remplit, mesurée sur les 30 dernières
-    minutes (5h) ou les dernières 24 h (semaine). Tant que l'historique est plus court,
-    c'est la moyenne depuis le début de la fenêtre.
+  - `6%/h` : la vitesse à laquelle la fenêtre se remplit, en moyenne depuis son début
+    (toute la fenêtre 5h, toute la semaine). Elle apparaît après 10 minutes (5h) ou
+    2 heures (semaine).
   - sa couleur : gris tant que tu as de la marge, orange quand tu approches du rythme qui
     t'amènerait pile à 100 % au reset, rouge quand tu le dépasses.
   - `→ 43%` : le pourcentage que tu auras au reset si tu gardes ce rythme.
@@ -110,8 +110,8 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
 
 - **Historique des limites** : chaque relevé des fenêtres 5h / 7j / Fable est gardé 8 jours
   dans `~/.claude/plugins/store/shell-watch_*.json`. Ce fichier est commun à toutes les
-  sessions et tous les projets, ce qui donne un rythme même juste après l'ouverture d'une
-  session.
+  sessions et tous les projets : chaque session voit le pourcentage le plus haut relevé
+  par les autres.
 - **Shells, agents, tokens** : propres à la session, ils repartent de zéro à chaque démarrage.
 - **`/usage`** : lu par `claude -p --safe-mode --no-session-persistence /usage`, sans
   plugins, sans session enregistrée et sans requête au modèle.
@@ -122,8 +122,8 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
   changer.
 - La fenêtre par modèle (Fable) dépend du texte affiché par `/usage` : si une version de
   Claude Code le change, cette barre disparaît, le reste du panneau continue de marcher.
-- Le pourcentage d'une limite n'a qu'une décimale : le rythme récent n'est fiable qu'après
-  quelques minutes de travail.
+- Le pourcentage d'une limite n'a qu'une décimale : en début de fenêtre, le rythme bouge
+  par paliers.
 
 ## Développement
 
