@@ -49,18 +49,21 @@ date et l'heure, le modèle de la session et son niveau d'effort.
 ### Abonnement
 
 ```
-5h     ━━━━━━   20%  reset dans 3h50 (09:30) · 6%/h → 43%
-7j     ━━━━━━   13%  reset dans 2j 15h (dim. 21:00) · 0,4%/h → 32%
-Fable  ━━━━━━   17%  reset dans 2j 15h (dim. 20:59) · 0,5%/h → 38%
+5h     ━━━━━━   20%    reset dans 3h50 (09:30)
+       6%/h → 43%
+7j     ━━━━━━   13%    reset dans 2j 15h (dim. 21:00)
+       0,4%/h → 32%
+Fable  ━━━━━━   17%    reset dans 2j 15h (dim. 20:59)
+       0,5%/h → 38%
 
-ctx    ━━━━━━   41%  82k / 200k
+ctx    ━━━━━━   41%    82k / 200k
 coût   $3.10 · 2,58 $/h · 2,4k tok/min
 ```
 
 - **5h** et **7j** : les limites de l'abonnement, tous modèles confondus.
 - **Fable** (ou un autre modèle) : la semaine propre à un modèle, quand ton abonnement en a
   une. L'API ne la donne pas : le mod la lit dans `/usage`, toutes les 5 minutes.
-- Après le reset, le **rythme** et la **projection** :
+- Sous la barre, le **rythme** et la **projection** :
   - `6%/h` : la vitesse à laquelle la fenêtre se remplit, en moyenne depuis son début
     (toute la fenêtre 5h, toute la semaine). Elle apparaît après 10 minutes (5h) ou
     2 heures (semaine).

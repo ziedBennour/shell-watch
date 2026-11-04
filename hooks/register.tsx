@@ -852,9 +852,11 @@ export const register: Register = on => {
     const runs = await read($, agents)
     const width = Math.max(30, (e.props.bodyColumns || e.viewport?.columns || 80) - 2)
     const inner = width - 2
-    // The reset and the pace sit on their own line, under the bar: the bar
-    // only shares its line with the label, the % and ctx's short note.
-    const barW = Math.max(8, Math.min(28, inner - 26))
+    // The bar shares its line with the label, the % and the reset
+    // ("reset dans 2j 15h (dim. 21:00)", 30 columns); the pace goes below.
+    // A few spaces set the reset (and ctx's tokens) apart from the %.
+    const GAP = '   '
+    const barW = Math.max(8, Math.min(28, inner - 44 - GAP.length))
     const now = u.at || Date.now()
     // Tokens per minute over the session (cache reads left out).
     const tokAvg = tok.since && now - tok.since >= MIN ? tok.total / ((now - tok.since) / MIN) : undefined
@@ -906,7 +908,7 @@ export const register: Register = on => {
       )
     }
 
-    // After a window's reset: its rate (dim, peach near the pace that just
+    // Under a window's bar: its rate (dim, peach near the pace that just
     // lasts until the reset, red past it), then the % it ends at, or when
     // it runs out first.
     const paceTag = (l: Limit) => {
@@ -915,7 +917,6 @@ export const register: Register = on => {
       const hot = p.rate > p.sustain ? C.red : p.rate > p.sustain * 0.8 ? C.accent : C.dim
       return (
         <Text>
-          <Text color={C.dim}>{' · '}</Text>
           <Text color={hot}>{`${fmtRate(p.rate)}%/h`}</Text>
           {p.hitAt !== undefined ? (
             <Text color={C.red}>{` → limite dans ${fmtIn(p.hitAt - now)} (${fmtAt(p.hitAt, now)})`}</Text>
@@ -1064,14 +1065,15 @@ export const register: Register = on => {
             ...(u.limits.length === 0
               ? [<Text key="no-limits" color={C.dim}>Limites inconnues (attend la prochaine réponse de l'API)</Text>]
               : u.limits.map(l => (
-                  // the bar, then its reset and pace on a line of their own
+                  // the bar and its reset, then the pace on a line of its own
                   <Box key={`lim-${l.kind}`} flexDirection="column">
-                    {meter(kindLabel(l.kind), l.percent, level(l.percent))}
-                    <Text>
-                      <Text>{' '.repeat(7)}</Text>
-                      <Text color={C.dim}>{fmtReset(l.resetsAt, now)}</Text>
-                      {paceTag(l)}
-                    </Text>
+                    {meter(kindLabel(l.kind), l.percent, level(l.percent), GAP + fmtReset(l.resetsAt, now))}
+                    {paceTag(l) ? (
+                      <Text>
+                        <Text>{' '.repeat(7)}</Text>
+                        {paceTag(l)}
+                      </Text>
+                    ) : null}
                   </Box>
                 ))),
             ...(u.ctxPercent !== undefined
@@ -1083,7 +1085,7 @@ export const register: Register = on => {
                       'ctx',
                       u.ctxPercent,
                       u.ctxPercent >= 50 ? level(u.ctxPercent) : C.text,
-                      `${u.ctxTokens !== undefined ? fmtTokens(u.ctxTokens) : '?'} / ${u.ctxWindow ? fmtTokens(u.ctxWindow) : '?'}`,
+                      `${GAP}${u.ctxTokens !== undefined ? fmtTokens(u.ctxTokens) : '?'} / ${u.ctxWindow ? fmtTokens(u.ctxWindow) : '?'}`,
                     )}
                   </Box>,
                 ]
