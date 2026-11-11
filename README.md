@@ -50,7 +50,7 @@ date et l'heure, le modèle de la session et son niveau d'effort.
 
 ```
 5h     ━━━━━━   20%    reset dans 3h50 (09:30)
-       6%/h  →  -15:40   →  -12%
+       6%/h  →  43%   →  +57% au reset
 7j     ━━━━━━   13%    reset dans 2j 15h (dim. 21:00)
        0,4%/h  →  32%   →  +68% au reset
 Fable  ━━━━━━   17%    reset dans 2j 15h (dim. 20:59)
