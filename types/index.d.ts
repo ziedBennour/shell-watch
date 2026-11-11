@@ -69,6 +69,8 @@ export type Pace = {
   sustain: number
   /** when the limit is reached at `rate`, if before the reset */
   hitAt?: number
+  /** how far past 100 % it would be at the reset at `rate`, when `hitAt` is set */
+  over?: number
   /** the % expected at the reset at `rate`, when the limit is not reached first */
   atReset?: number
 }

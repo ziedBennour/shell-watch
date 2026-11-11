@@ -50,11 +50,11 @@ date et l'heure, le modèle de la session et son niveau d'effort.
 
 ```
 5h     ━━━━━━   20%    reset dans 3h50 (09:30)
-       6%/h → 43%
+       6%/h  →  -15:40   →  -12%
 7j     ━━━━━━   13%    reset dans 2j 15h (dim. 21:00)
-       0,4%/h → 32%
+       0,4%/h  →  32%   →  +68% au reset
 Fable  ━━━━━━   17%    reset dans 2j 15h (dim. 20:59)
-       0,5%/h → 38%
+       0,5%/h  →  38%   →  +62% au reset
 
 ctx    ━━━━━━   41%    82k / 200k
 coût   $3.10 · 2,58 $/h · 2,4k tok/min
@@ -69,8 +69,10 @@ coût   $3.10 · 2,58 $/h · 2,4k tok/min
     2 heures (semaine).
   - sa couleur : gris tant que tu as de la marge, orange quand tu approches du rythme qui
     t'amènerait pile à 100 % au reset, rouge quand tu le dépasses.
-  - `→ 43%` : le pourcentage que tu auras au reset si tu gardes ce rythme.
-  - `→ limite dans 1h20 (15:40)` en rouge : à ce rythme, la limite tombe avant le reset.
+  - `→  32%   →  +68% au reset` : le pourcentage que tu auras au reset si tu gardes ce
+    rythme, puis ce qu'il te restera.
+  - `→  -15:40   →  -12%` en rouge : à ce rythme, la limite tombe avant le reset, à 15:40
+    (avec le jour si ce n'est pas aujourd'hui), et serait dépassée de 12 % au reset.
 - **ctx** : le remplissage de la fenêtre de contexte de la session.
 - **coût** : le coût de la session en équivalent API, ce coût par heure, et les tokens
   consommés par minute (sous-agents compris, lectures du cache non comptées).

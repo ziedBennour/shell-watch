@@ -398,9 +398,10 @@ const paceOf = (l: Limit, samples: Sample[], now: number): Pace | undefined => {
   if (span < minSpan(l.kind)) return { sustain }
   const rate = cur / (span / HOUR)
   const hit = rate > 0 ? now + ((100 - cur) / rate) * HOUR : Infinity
+  const atReset = cur + (rate * (reset - now)) / HOUR
   return hit < reset
-    ? { rate, span, sustain, hitAt: hit }
-    : { rate, span, sustain, atReset: Math.min(100, cur + (rate * (reset - now)) / HOUR) }
+    ? { rate, span, sustain, hitAt: hit, over: atReset - 100 }
+    : { rate, span, sustain, atReset: Math.min(100, atReset) }
 }
 
 /** Counts a model request's tokens: new input, cache writes and output; cache reads are left out. */
@@ -909,8 +910,8 @@ export const register: Register = on => {
     }
 
     // Under a window's bar: its rate (dim, peach near the pace that just
-    // lasts until the reset, red past it), then the % it ends at, or when
-    // it runs out first.
+    // lasts until the reset, red past it), then the % it ends at and the "+%" left,
+    // or "-" and when it runs out first, then "-%" past 100 at the reset.
     const paceTag = (l: Limit) => {
       const p = u.pace?.[l.kind]
       if (!p || p.rate === undefined || l.percent >= 100) return ''
@@ -919,9 +920,14 @@ export const register: Register = on => {
         <Text>
           <Text color={hot}>{`${fmtRate(p.rate)}%/h`}</Text>
           {p.hitAt !== undefined ? (
-            <Text color={C.red}>{` → limite dans ${fmtIn(p.hitAt - now)} (${fmtAt(p.hitAt, now)})`}</Text>
+            <Text color={C.red}>{`  →  -${fmtAt(p.hitAt, now)}${p.over !== undefined ? `   →  -${Math.round(p.over)}%` : ''}`}</Text>
           ) : (
-            <Text color={C.dim}>{` → ${Math.round(p.atReset ?? 0)}%`}</Text>
+            // VS Code lifts any grey under its minimum contrast, so the
+            // percentages go a step lighter (sub) to stand above "au reset".
+            <Text>
+              <Text color={C.sub}>{`  →  ${Math.round(p.atReset ?? 0)}%   →  +${100 - Math.round(p.atReset ?? 0)}%`}</Text>
+              <Text color={C.dim}>{' au reset'}</Text>
+            </Text>
           )}
         </Text>
       )
