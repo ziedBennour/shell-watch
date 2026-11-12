@@ -63,6 +63,8 @@ coût   $3.10 · 2,58 $/h · 2,4k tok/min
 - **5h** et **7j** : les limites de l'abonnement, tous modèles confondus.
 - **Fable** (ou un autre modèle) : la semaine propre à un modèle, quand ton abonnement en a
   une. L'API ne la donne pas : le mod la lit dans `/usage`, toutes les 5 minutes.
+- La barre : verte, orange quand il te restera moins de 10 % au reset à ce rythme (ou que
+  la limite tombe avant), rouge à partir de 80 %.
 - Sous la barre, le **rythme** et la **projection** :
   - `6%/h` : la vitesse à laquelle la fenêtre se remplit, en moyenne depuis son début
     (toute la fenêtre 5h, toute la semaine). Elle apparaît après 10 minutes (5h) ou

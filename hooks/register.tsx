@@ -912,6 +912,16 @@ export const register: Register = on => {
     // Under a window's bar: its rate (dim, peach near the pace that just
     // lasts until the reset, red past it), then the % it ends at and the "+%" left,
     // or "-" and when it runs out first, then "-%" past 100 at the reset.
+    // A window's bar: red from 80 %, orange when less than 10 % would be
+    // left at the reset at this pace (or it runs out first), mint otherwise.
+    const limitLevel = (l: Limit) => {
+      if (l.percent >= 80) return C.red
+      const p = u.pace?.[l.kind]
+      if (!p || p.rate === undefined) return C.mint
+      const left = p.hitAt !== undefined ? 0 : 100 - Math.round(p.atReset ?? 0)
+      return left < 10 ? C.accent : C.mint
+    }
+
     const paceTag = (l: Limit) => {
       const p = u.pace?.[l.kind]
       if (!p || p.rate === undefined || l.percent >= 100) return ''
@@ -1073,7 +1083,7 @@ export const register: Register = on => {
               : u.limits.map(l => (
                   // the bar and its reset, then the pace on a line of its own
                   <Box key={`lim-${l.kind}`} flexDirection="column">
-                    {meter(kindLabel(l.kind), l.percent, level(l.percent), GAP + fmtReset(l.resetsAt, now))}
+                    {meter(kindLabel(l.kind), l.percent, limitLevel(l), GAP + fmtReset(l.resetsAt, now))}
                     {paceTag(l) ? (
                       <Text>
                         <Text>{' '.repeat(7)}</Text>
