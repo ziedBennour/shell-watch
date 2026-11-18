@@ -191,6 +191,23 @@ const fmtReset = (iso: string | undefined, now: number) => {
   return `reset dans ${fmtIn(left)} (${fmtAt(t, now)})`
 }
 
+/**
+ * A window's pace and reset, cut in cells for a single line:
+ * "6%/h", "→ 43%", "+57%", "↻ 3h50 (09:30)";
+ * or "→ -15:40", "-12%" when the limit falls before the reset.
+ */
+type Cells = { rate: string; proj: string; left: string; hit: boolean; reset: string }
+const limitCells = (l: Limit, p: Pace | undefined, now: number): Cells => {
+  const t = l.resetsAt ? Date.parse(l.resetsAt) : NaN
+  const reset = Number.isNaN(t) ? '' : t <= now ? '↻ imminent' : `↻ ${fmtIn(t - now)} (${fmtAt(t, now)})`
+  if (!p || p.rate === undefined || l.percent >= 100) return { rate: '', proj: '', left: '', hit: false, reset }
+  const rate = `${fmtRate(p.rate)}%/h`
+  if (p.hitAt !== undefined)
+    return { rate, proj: `→ -${fmtAt(p.hitAt, now)}`, left: p.over !== undefined ? `-${Math.round(p.over)}%` : '', hit: true, reset }
+  const at = Math.round(p.atReset ?? 0)
+  return { rate, proj: `→ ${at}%`, left: `+${100 - at}%`, hit: false, reset }
+}
+
 const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1)
 
 const kindLabel = (kind: string) =>
@@ -853,12 +870,24 @@ export const register: Register = on => {
     const runs = await read($, agents)
     const width = Math.max(30, (e.props.bodyColumns || e.viewport?.columns || 80) - 2)
     const inner = width - 2
-    // The bar shares its line with the label, the % and the reset
-    // ("reset dans 2j 15h (dim. 21:00)", 30 columns); the pace goes below.
+    const now = u.at || Date.now()
+    // One line per window: label, bar, %, pace → % at the reset and what is
+    // left, then ↻ the reset; columns line up from one window to the next.
+    // Too narrow for that: the bar keeps the reset ("reset dans 2j 15h
+    // (dim. 21:00)", 30 columns) and the pace goes on a second line.
     // A few spaces set the reset (and ctx's tokens) apart from the %.
     const GAP = '   '
-    const barW = Math.max(8, Math.min(28, inner - 44 - GAP.length))
-    const now = u.at || Date.now()
+    const cells = u.limits.map(l => limitCells(l, u.pace?.[l.kind], now))
+    const colW = (k: 'rate' | 'proj' | 'left' | 'reset') => Math.max(0, ...cells.map(c => c[k].length))
+    const wRate = colW('rate')
+    const wProj = colW('proj')
+    const wLeft = colW('left')
+    const wReset = colW('reset')
+    const paceW = wRate ? wRate + 1 + wProj + (wLeft ? 2 + wLeft : 0) : 0
+    // label 7 + bar + space + "100%" 4, then the pace and the reset, 2 spaces apart
+    const lineW = 12 + (paceW ? 2 + paceW : 0) + (wReset ? 2 + wReset : 0)
+    const oneLine = inner - lineW >= 8
+    const barW = oneLine ? Math.min(20, inner - lineW) : Math.max(8, Math.min(28, inner - 44 - GAP.length))
     // Tokens per minute over the session (cache reads left out).
     const tokAvg = tok.since && now - tok.since >= MIN ? tok.total / ((now - tok.since) / MIN) : undefined
 
@@ -939,6 +968,39 @@ export const register: Register = on => {
               <Text color={C.dim}>{' au reset'}</Text>
             </Text>
           )}
+        </Text>
+      )
+    }
+
+    // The whole window on one line, its cells padded to the widest of the windows.
+    const limitLine = (l: Limit, c: Cells) => {
+      const p = u.pace?.[l.kind]
+      const hot = p?.rate === undefined ? C.dim : p.rate > p.sustain ? C.red : p.rate > p.sustain * 0.8 ? C.accent : C.dim
+      const b = barParts(l.percent, barW)
+      return (
+        <Text key={`lim-${l.kind}`}>
+          <Text color={C.sub}>{kindLabel(l.kind).padEnd(7)}</Text>
+          <Text color={limitLevel(l)}>{b.on}</Text>
+          <Text color={C.track}>{b.off}</Text>
+          <Text color={C.text} bold>
+            {' '}
+            {`${Math.round(l.percent)}%`.padStart(4)}
+          </Text>
+          {paceW ? (
+            c.rate ? (
+              <Text>
+                <Text color={hot}>{`  ${c.rate.padStart(wRate)}`}</Text>
+                {/* VS Code lifts any grey under its minimum contrast: sub, a step lighter, for the % */}
+                <Text color={c.hit ? C.red : C.sub}>{` ${c.proj.padEnd(wProj)}`}</Text>
+                {wLeft ? <Text color={c.hit ? C.red : C.sub}>{`  ${c.left.padStart(wLeft)}`}</Text> : ''}
+              </Text>
+            ) : (
+              <Text>{' '.repeat(2 + paceW)}</Text>
+            )
+          ) : (
+            ''
+          )}
+          {c.reset ? <Text color={C.dim}>{`  ${c.reset}`}</Text> : ''}
         </Text>
       )
     }
@@ -1076,22 +1138,30 @@ export const register: Register = on => {
           <Text color={C.accent} bold>
             Abonnement
           </Text>
-          {/* one blank line between every row, to breathe */}
+          {/* one blank line between every block, to breathe; the windows stay together */}
           {[
-            ...(u.limits.length === 0
-              ? [<Text key="no-limits" color={C.dim}>Limites inconnues (attend la prochaine réponse de l'API)</Text>]
-              : u.limits.map(l => (
-                  // the bar and its reset, then the pace on a line of its own
-                  <Box key={`lim-${l.kind}`} flexDirection="column">
-                    {meter(kindLabel(l.kind), l.percent, limitLevel(l), GAP + fmtReset(l.resetsAt, now))}
-                    {paceTag(l) ? (
-                      <Text>
-                        <Text>{' '.repeat(7)}</Text>
-                        {paceTag(l)}
-                      </Text>
-                    ) : null}
-                  </Box>
-                ))),
+            u.limits.length === 0 ? (
+              <Text key="no-limits" color={C.dim}>Limites inconnues (attend la prochaine réponse de l'API)</Text>
+            ) : (
+              <Box key="limits" flexDirection="column">
+                {u.limits.map((l, i) =>
+                  oneLine ? (
+                    limitLine(l, cells[i] as Cells)
+                  ) : (
+                    // the bar and its reset, then the pace on a line of its own
+                    <Box key={`lim-${l.kind}`} flexDirection="column">
+                      {meter(kindLabel(l.kind), l.percent, limitLevel(l), GAP + fmtReset(l.resetsAt, now))}
+                      {paceTag(l) ? (
+                        <Text>
+                          <Text>{' '.repeat(7)}</Text>
+                          {paceTag(l)}
+                        </Text>
+                      ) : null}
+                    </Box>
+                  ),
+                )}
+              </Box>
+            ),
             ...(u.ctxPercent !== undefined
               ? [
                   // an extra blank line sets the limits apart from the session's figures

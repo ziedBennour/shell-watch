@@ -49,32 +49,34 @@ date et l'heure, le modèle de la session et son niveau d'effort.
 ### Abonnement
 
 ```
-5h     ━━━━━━   20%    reset dans 3h50 (09:30)
-       6%/h  →  43%   →  +57% au reset
-7j     ━━━━━━   13%    reset dans 2j 15h (dim. 21:00)
-       0,4%/h  →  32%   →  +68% au reset
-Fable  ━━━━━━   17%    reset dans 2j 15h (dim. 20:59)
-       0,5%/h  →  38%   →  +62% au reset
+5h     ━━━━━━━━━━  20%  6,0%/h → 43%  +57%  ↻ 3h50 (09:30)
+7j     ━━━━━━━━━━  13%  0,4%/h → 32%  +68%  ↻ 2j 15h (dim. 21:00)
+Fable  ━━━━━━━━━━  17%  0,5%/h → 38%  +62%  ↻ 2j 15h (dim. 20:59)
 
-ctx    ━━━━━━   41%    82k / 200k
+ctx    ━━━━━━━━━━  41%    82k / 200k
 coût   $3.10 · 2,58 $/h · 2,4k tok/min
 ```
+
+Une ligne par limite, les colonnes alignées d'une limite à l'autre. Quand le panneau est
+trop étroit (moins de 65 à 70 colonnes environ), chaque limite passe sur deux lignes : la
+barre avec son reset, puis le rythme et la projection en dessous.
 
 - **5h** et **7j** : les limites de l'abonnement, tous modèles confondus.
 - **Fable** (ou un autre modèle) : la semaine propre à un modèle, quand ton abonnement en a
   une. L'API ne la donne pas : le mod la lit dans `/usage`, toutes les 5 minutes.
 - La barre : verte, orange quand il te restera moins de 10 % au reset à ce rythme (ou que
   la limite tombe avant), rouge à partir de 80 %.
-- Sous la barre, le **rythme** et la **projection** :
+- Après le pourcentage, le **rythme**, la **projection** et le **reset** :
   - `6%/h` : la vitesse à laquelle la fenêtre se remplit, en moyenne depuis son début
     (toute la fenêtre 5h, toute la semaine). Elle apparaît après 10 minutes (5h) ou
     2 heures (semaine).
   - sa couleur : gris tant que tu as de la marge, orange quand tu approches du rythme qui
     t'amènerait pile à 100 % au reset, rouge quand tu le dépasses.
-  - `→  32%   →  +68% au reset` : le pourcentage que tu auras au reset si tu gardes ce
-    rythme, puis ce qu'il te restera.
-  - `→  -15:40   →  -12%` en rouge : à ce rythme, la limite tombe avant le reset, à 15:40
+  - `→ 32%  +68%` : le pourcentage que tu auras au reset si tu gardes ce rythme, puis ce
+    qu'il te restera.
+  - `→ -15:40  -12%` en rouge : à ce rythme, la limite tombe avant le reset, à 15:40
     (avec le jour si ce n'est pas aujourd'hui), et serait dépassée de 12 % au reset.
+  - `↻ 3h50 (09:30)` : le reset de la fenêtre, dans combien de temps et à quelle heure.
 - **ctx** : le remplissage de la fenêtre de contexte de la session.
 - **coût** : le coût de la session en équivalent API, ce coût par heure, et les tokens
   consommés par minute (sous-agents compris, lectures du cache non comptées).
