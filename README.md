@@ -46,8 +46,8 @@ titre) ; une section pliée le reste d'une session à l'autre.
 
 ### En-tête
 
-Le nom du projet en grandes lettres, son dossier, depuis quand la session est ouverte, la
-date et l'heure, le modèle de la session et son niveau d'effort.
+Le nom du projet, son dossier en entier, depuis quand la session est ouverte, puis la date
+et l'heure, le modèle de la session et son niveau d'effort, une ligne vide entre chaque.
 
 ### Abonnement
 
@@ -187,7 +187,6 @@ claude plugin validate .
 
 - `hooks/register.tsx` : le mod (hooks, calculs, rendu du panneau).
 - `hooks/project.ts` : les enregistrements de la section Projet (par jour, par session, archive).
-- `hooks/bigfont.ts` : les grandes lettres du nom de projet.
 - `types/index.d.ts` : le contrat des valeurs que le mod garde (`$.state`).
 
 ## Licence

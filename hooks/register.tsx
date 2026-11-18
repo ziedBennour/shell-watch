@@ -15,7 +15,6 @@ import type {
   Tokens,
   Usage,
 } from '../types'
-import { GLYPH_W, bigRows, mix } from './bigfont'
 import {
   type Archive,
   type ProcRec,
@@ -1405,13 +1404,9 @@ export const register: Register = on => {
     // Tokens per minute over the session (cache reads left out).
     const tokAvg = tok.since && now - tok.since >= MIN ? tok.total / ((now - tok.since) / MIN) : undefined
 
-    // Project name in big letters, with a mauve → blue gradient.
+    // The project's name and its folder, in full.
     const root = await $.session.root().catch(() => '')
     const project = root.split(/[\\/]/).filter(Boolean).pop() ?? ''
-    const fitsBig = project.length > 0 && project.length * (GLYPH_W + 1) - 1 <= inner
-    const big = fitsBig ? bigRows(project) : []
-    const shade = (i: number) => mix(C.accent, C.mint, project.length > 1 ? i / (project.length - 1) : 0)
-    const home = tilde(root)
 
     // A click in the pane is a sign the person is there.
     const press = (fn: () => unknown) => async () => {
@@ -1667,38 +1662,26 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" flexGrow={1} backgroundColor={C.base} paddingX={1} paddingY={1}>
         {project ? (
+          // One blank line between the lines, to read them at a glance.
           <Box flexDirection="column" alignItems="center" marginBottom={1}>
-            {fitsBig ? (
-              big.map((cells, r) => (
-                <Text key={`big-${r}`}>
-                  {cells.map((cell, i) => (
-                    <Text key={`big-${r}-${i}`} color={shade(i)}>
-                      {i > 0 ? ' ' : ''}
-                      {cell}
-                    </Text>
-                  ))}
-                </Text>
-              ))
-            ) : (
-              <Text color={C.accent} bold>
-                {project.toUpperCase()}
-              </Text>
-            )}
-            <Text color={C.dim}>
-              {home}
-              {u.startedAt ? (
-                <Text>
-                  {'  ·  session depuis '}
-                  <Text color={C.sub} bold>
-                    {fmtSince(now - u.startedAt)}
-                  </Text>
-                  {` (ouverte à ${clockHM(u.startedAt)})`}
-                </Text>
-              ) : (
-                ''
-              )}
+            <Text color={C.accent} bold>
+              {project}
             </Text>
             <Text> </Text>
+            <Text color={C.sub} wrap="truncate-start">
+              {root}
+            </Text>
+            <Text> </Text>
+            {u.startedAt ? (
+              <Text color={C.dim}>
+                {'session depuis '}
+                <Text color={C.sub} bold>
+                  {fmtSince(now - u.startedAt)}
+                </Text>
+                {` (ouverte à ${clockHM(u.startedAt)})`}
+              </Text>
+            ) : null}
+            {u.startedAt ? <Text> </Text> : null}
             <Text>
               <Text color={C.sub}>{fmtDate(now)}</Text>
               <Text color={C.dim}>{'  ·  '}</Text>
