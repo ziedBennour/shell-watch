@@ -100,6 +100,39 @@ export type Usage = {
   pace?: Record<string, Pace>
 }
 
+/** A model's part of a project's work: its cost and its tokens by kind. */
+export type ModelDay = {
+  /** $ at API prices (an estimate, not the subscription's bill) */
+  usd: number
+  input: number
+  cacheWrite: number
+  cacheRead: number
+  output: number
+}
+
+/** Work on a project over a span: times in ms, cost in $ at API prices, per model id. */
+export type ProjDay = {
+  /** the session open (ticks of the timer; a machine asleep does not count) */
+  open: number
+  /** someone at work: the person present, or the model in a turn or a subagent */
+  work: number
+  usd: number
+  models: Record<string, ModelDay>
+}
+
+/** What the Projet section shows, every session on the project summed. */
+export type ProjectView = {
+  /** the session's folder; '' until known */
+  root: string
+  today: ProjDay
+  /** today and the 6 days before */
+  week: ProjDay
+  total: ProjDay
+}
+
+/** Sections of the pane that fold: their titles' keys. */
+export type Section = 'usage' | 'project' | 'agents' | 'shells'
+
 declare module 'claude-code' {
   interface PluginState {
     'shell-watch': {
@@ -109,6 +142,10 @@ declare module 'claude-code' {
       filter: Shaped<ShellFilter>
       tokens: Shaped<Tokens>
       agents: Shaped<AgentRun[]>
+      project: Shaped<ProjectView>
+      folded: Shaped<Section[]>
+      /** this process's id: its record's key in $.store */
+      proc: Shaped<string>
     }
   }
 }

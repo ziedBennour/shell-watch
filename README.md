@@ -1,8 +1,9 @@
 # shell-watch
 
 Mod pour Claude Code : un panneau, à côté de la conversation, qui montre en direct
-les commandes shell que Claude lance, les sous-agents au travail, et ta consommation
-d'abonnement (limites 5h / 7j / semaine par modèle) avec ton rythme et une projection.
+les commandes shell que Claude lance, les sous-agents au travail, ta consommation
+d'abonnement (limites 5h / 7j / semaine par modèle) avec ton rythme et une projection,
+et ce que coûte une heure de travail sur le projet.
 
 ## Installation
 
@@ -39,7 +40,9 @@ une modification du code ne compte qu'après cette mise à jour, et le numéro d
 Le panneau s'ouvre tout seul au démarrage d'une session quand le terminal est assez large
 (environ 110 à 144 colonnes). Sinon, ou après l'avoir fermé : tape `/shells`.
 
-Il se lit de haut en bas.
+Il se lit de haut en bas. Chaque section (Abonnement, Projet, Agents, Shells) se plie et
+se déplie d'un clic sur son titre (▾ ouverte, ▸ pliée, avec un résumé sur la ligne du
+titre) ; une section pliée le reste d'une session à l'autre.
 
 ### En-tête
 
@@ -81,6 +84,42 @@ barre avec son reset, puis le rythme et la projection en dessous.
 - **coût** : le coût de la session en équivalent API, ce coût par heure, et les tokens
   consommés par minute (sous-agents compris, lectures du cache non comptées).
 
+### Projet
+
+```
+▾ Projet  coût estimé au prix de l'API
+
+         coût  travail   $/h  ouvert   $/h
+auj.    $4.20     1h20  3,15    2h05  2,01
+7 j    $31.00     9h10  3,38   14h20  2,16
+total  $52.10    15h40  3,33   22h05  2,36
+
+Opus 5.5    $40.10  2,56 $/h  1,2M tok
+Haiku 4.5    $2.00  0,13 $/h  300k tok
+```
+
+Ce que coûte le projet (le dossier de la session), toutes ses sessions additionnées, celles
+qui tournent en parallèle comprises : aujourd'hui, les 7 derniers jours, et depuis
+l'installation de la version 0.10.0 (rien de rétroactif).
+
+- **coût** : une estimation en équivalent API (le coût que donne `/cost`), pas la facture de
+  l'abonnement. Chaque hausse va au modèle de la requête qui vient de finir, sous-agents
+  compris ; des requêtes finies en même temps se la partagent au prorata de leurs tokens,
+  pondérés comme l'API les facture (écriture du cache ×1,25, lecture ×0,1, sortie ×5).
+- **travail** : le temps où quelqu'un travaille. Toi : tu tapes, envoies un message, réponds
+  à une autorisation, cliques dans le panneau ou ouvres la session, il y a moins de 5 min.
+  Ou le modèle : un tour en cours (même s'il attend un shell lancé dans ce tour), ou un
+  sous-agent en marche. Claude qui attend ta réponse à une autorisation ou une question ne
+  travaille pas ; un shell en fond ou une minuterie seuls non plus. Après 5 min sans rien,
+  le compteur s'arrête et ce trou compte 3 min ; il repart au signe suivant.
+- **ouvert** : le temps où la session est ouverte ; une machine en veille ne compte pas.
+- **$/h** : le coût divisé par le temps de travail, puis par le temps ouvert (`–` sous 5 min).
+- Par modèle, sur le total : son coût, sa part du $/h de travail (les parts s'additionnent
+  au $/h du projet) et ses tokens, lectures du cache non comptées.
+
+`/couts` donne le détail jour par jour, chaque modèle avec ses quatre types de tokens
+(entrée, écriture du cache, lecture du cache, sortie).
+
 ### Agents
 
 N'apparaît qu'une fois qu'un sous-agent a été lancé dans la session.
@@ -121,6 +160,9 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
   dans `~/.claude/plugins/store/shell-watch_*.json`. Ce fichier est commun à toutes les
   sessions et tous les projets : chaque session voit le pourcentage le plus haut relevé
   par les autres.
+- **Projet** : un enregistrement par session (chaque session n'écrit que le sien) dans ce même
+  fichier, écrit chaque minute et à la fermeture ; les jours d'avant-hier et plus anciens
+  sont regroupés en un enregistrement par projet. Les sections pliées y sont aussi gardées.
 - **Shells, agents, tokens** : propres à la session, ils repartent de zéro à chaque démarrage.
 - **`/usage`** : lu par `claude -p --safe-mode --no-session-persistence /usage`, sans
   plugins, sans session enregistrée et sans requête au modèle.
@@ -133,6 +175,9 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
   Claude Code le change, cette barre disparaît, le reste du panneau continue de marcher.
 - Le pourcentage d'une limite n'a qu'une décimale : en début de fenêtre, le rythme bouge
   par paliers.
+- Le coût par modèle est une répartition : un coût qui ne vient pas d'une requête de la
+  conversation ou d'un sous-agent (le classifieur du mode auto, l'appel au modèle d'un autre
+  mod) va à la requête suivante. Le total du projet, lui, est exact au sens de `/cost`.
 
 ## Développement
 
@@ -140,7 +185,8 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
 claude plugin validate .
 ```
 
-- `hooks/register.tsx` : tout le mod (hooks, calculs, rendu du panneau).
+- `hooks/register.tsx` : le mod (hooks, calculs, rendu du panneau).
+- `hooks/project.ts` : les enregistrements de la section Projet (par jour, par session, archive).
 - `hooks/bigfont.ts` : les grandes lettres du nom de projet.
 - `types/index.d.ts` : le contrat des valeurs que le mod garde (`$.state`).
 

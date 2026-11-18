@@ -1,8 +1,40 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, AgentRunStatus, Limit, Pace, Shell, ShellFilter, ShellStatus, Tokens, Usage } from '../types'
+import type {
+  AgentRun,
+  AgentRunStatus,
+  Limit,
+  Pace,
+  ProjDay,
+  ProjectView,
+  Section,
+  Shell,
+  ShellFilter,
+  ShellStatus,
+  Tokens,
+  Usage,
+} from '../types'
 import { GLYPH_W, bigRows, mix } from './bigfont'
+import {
+  type Archive,
+  type ProcRec,
+  addInto,
+  dayKey,
+  dayShift,
+  dayTime,
+  emptyDay,
+  emptyModel,
+  mergeArchive,
+  mergeDays,
+  planCompaction,
+  roundArchive,
+  roundDay,
+  stepWeight,
+  sumDays,
+  toArchive,
+  toProc,
+} from './project'
 
 // shell-watch: a pane that streams the output of every Bash command Claude
 // runs (foreground and background), the subagents at work, plus
@@ -49,6 +81,16 @@ const tokens = atom(
   { shape: 'tokens-2' },
 )
 const agents = atom({ plugin: 'shell-watch', key: 'agents' } as const, [] as AgentRun[], { shape: 'agents-1' })
+const projectView = atom(
+  { plugin: 'shell-watch', key: 'project' } as const,
+  { root: '', today: emptyDay(), week: emptyDay(), total: emptyDay() } as ProjectView,
+  { shape: 'project-1' },
+)
+const folded = atom({ plugin: 'shell-watch', key: 'folded' } as const, [] as Section[], { shape: 'folded-1' })
+const proc = atom({ plugin: 'shell-watch', key: 'proc' } as const, '', { shape: 'proc-1' })
+
+const FOLD_KEY = 'folded-1'
+const SECTIONS: readonly unknown[] = ['usage', 'project', 'agents', 'shells'] satisfies Section[]
 
 /** Whether a shell belongs to a filter. */
 const matches = (s: Shell, f: ShellFilter) =>
@@ -500,8 +542,10 @@ async function pollUsage($: EngineInterface, now: number) {
 // --- usage -------------------------------------------------------------------
 
 async function refreshUsage($: EngineInterface) {
-  const u = await $.session.usage()
   const now = await $.clock.now()
+  const u = await $.session.usage()
+  // Right after the read: the requests it already counts are the ones queued.
+  takeCost(u.cost?.usd, now)
   const reported: Limit[] = u.rateLimits.map(l => clean({ kind: l.kind, percent: l.percentUsed, resetsAt: l.resetsAt }))
   // Off the tick: the CLI takes a few seconds.
   if (reported.length > 0) void pollUsage($, now)
@@ -534,6 +578,370 @@ async function refreshUsage($: EngineInterface) {
   await update($, usage, () => clean(next))
 }
 
+// --- project: cost and time ------------------------------------------------------
+//
+// Work is someone at it: the person (a signal under AWAY_MS old: typing,
+// sending, answering a permission, a click in the pane, the session opening)
+// or the model (a turn under way, even one waiting on its shell, or a
+// subagent's). Claude waiting on a permission or a question is not at work;
+// a background shell or a timer alone is not either. AWAY_MS without either:
+// the count stops and the gap counts AWAY_KEEP.
+
+const AWAY_MS = 5 * MIN
+const AWAY_KEEP = 3 * MIN
+// Ticks further apart than this: the machine slept, the gap is not counted.
+const ASLEEP_MS = 2 * MIN
+const PROJ_SYNC_MS = 60_000
+const COMPACT_MS = HOUR
+
+type Proj = {
+  root: string
+  /** `proj-1|<root>|` */
+  prefix: string
+  /** this process's key */
+  key: string
+  pid: string
+  days: Record<string, ProjDay>
+  dirty: boolean
+  syncedAt: number
+  compactedAt: number
+  archive: Archive
+  /** the other processes' records, by key */
+  others: Map<string, { pid: string; rec: ProcRec }>
+  /** the archive and the other processes, merged by day: all but this process */
+  base: Map<string, ProjDay>
+}
+let proj: Proj | null = null
+let projFailed = false
+
+// The session's cost as last shared out, and the responses since, waiting for
+// the next reading of the total.
+let costBase: number | undefined
+type Step = { model: string; w: number; input: number; cacheWrite: number; cacheRead: number; output: number }
+const steps: Step[] = []
+let lastModel = ''
+
+// Who is at work.
+let signaled = false
+let activeAt = 0
+let tickAt = 0
+let away = false
+// Work counted since the last activity, per day: what an absence takes back.
+const gap = new Map<string, number>()
+// Loops in a turn: '' for the main one, a subagent's id; and the calls waiting
+// on a person, with their loop.
+const loops = new Set<string>()
+const asks = new Map<string, string>()
+
+const isWorking = () => {
+  const waiting = new Set(asks.values())
+  for (const l of loops) if (!waiting.has(l)) return true
+  return false
+}
+
+/** A sign that the person is there. */
+const signal = () => {
+  signaled = true
+}
+
+/** A call a person was asked about went on (allowed or refused): they answered. */
+const answered = (id: string | undefined) => {
+  if (id && asks.delete(id)) signal()
+}
+
+const dayOf = (p: Proj, day: string) => (p.days[day] ??= emptyDay())
+
+/**
+ * Shares the rise of the session's cost between the responses that ended
+ * since the last reading, by their weight, each to its model. A total that
+ * went down (/clear) is the new base. A rise with no response (a mod's model
+ * call) waits for the next one, or goes to the last model at the end.
+ */
+function takeCost(usd: number | undefined, now: number, final = false) {
+  if (!proj || usd === undefined) {
+    // Nowhere to count them: they do not wait.
+    steps.length = 0
+    return
+  }
+  if (costBase === undefined || usd < costBase) costBase = usd
+  const delta = usd - costBase
+  const done = steps.splice(0)
+  if (done.length === 0) {
+    if (!final || !(delta > 0) || !lastModel) return
+    done.push({ model: lastModel, w: 1, input: 0, cacheWrite: 0, cacheRead: 0, output: 0 })
+  }
+  costBase = usd
+  const rec = dayOf(proj, dayKey(now))
+  const total = done.reduce((s, x) => s + x.w, 0)
+  for (const s of done) {
+    const share = total > 0 ? (delta * s.w) / total : delta / done.length
+    const m = (rec.models[s.model] ??= emptyModel())
+    m.usd += share
+    m.input += s.input
+    m.cacheWrite += s.cacheWrite
+    m.cacheRead += s.cacheRead
+    m.output += s.output
+    rec.usd += share
+  }
+  proj.dirty = true
+}
+
+/** One tick of the clocks: open time, and work time by the rule above. */
+function accountTime(now: number) {
+  const p = proj
+  if (!p) return
+  const dt = tickAt ? now - tickAt : 0
+  tickAt = now
+  const active = signaled || isWorking()
+  signaled = false
+  if (active) {
+    activeAt = now
+    away = false
+    gap.clear()
+  }
+  if (dt <= 0 || dt > ASLEEP_MS) return
+  const day = dayKey(now)
+  const rec = dayOf(p, day)
+  rec.open += dt
+  p.dirty = true
+  if (away) return
+  if (now - activeAt >= AWAY_MS) {
+    away = true
+    // The gap counts AWAY_KEEP: the rest comes off, latest day first; days
+    // before yesterday are closed (archived) and stay as they are.
+    let over = [...gap.values()].reduce((s, x) => s + x, 0) - AWAY_KEEP
+    const yesterday = dayShift(now, -1)
+    for (const [d, ms] of [...gap].reverse()) {
+      const r = p.days[d]
+      if (over <= 0 || d < yesterday || !r) continue
+      const cut = Math.min(over, ms, r.work)
+      r.work -= cut
+      over -= cut
+    }
+    gap.clear()
+    return
+  }
+  rec.work += dt
+  if (!active) gap.set(day, (gap.get(day) ?? 0) + dt)
+}
+
+const procKey = (prefix: string, pid: string) => `${prefix}p|${pid}`
+
+/** Writes this process's record, reads the others', compacts now and then. */
+async function syncProject($: EngineInterface, now: number) {
+  const p = proj
+  if (!p) return
+  p.syncedAt = now
+  if (p.dirty) {
+    p.dirty = false
+    await $.store.set(p.key, {
+      at: now,
+      days: Object.fromEntries(Object.entries(p.days).map(([k, d]) => [k, roundDay(d)])),
+    })
+  }
+  const keys = (await $.store.keys()).filter(k => k.startsWith(`${p.prefix}p|`) && k !== p.key)
+  p.archive = toArchive(await $.store.get(`${p.prefix}a`))
+  p.others = new Map()
+  for (const k of keys) p.others.set(k, { pid: k.slice(p.prefix.length + 2), rec: toProc(await $.store.get(k)) })
+  if (now - p.compactedAt >= COMPACT_MS) await compact($, p, now)
+  p.base = mergeDays(
+    p.archive,
+    [...p.others.values()].map(o => [o.pid, o.rec.days] as const),
+  )
+}
+
+/** Moves closed days into the archive; drops or deletes those it already holds. */
+async function compact($: EngineInterface, p: Proj, now: number) {
+  p.compactedAt = now
+  const plan = planCompaction(now, p.archive, { pid: p.pid, days: p.days }, p.others)
+  for (const day of plan.drop) {
+    delete p.days[day]
+    p.dirty = true
+  }
+  for (const k of plan.remove) {
+    await $.store.delete(k)
+    p.others.delete(k)
+  }
+  if (plan.merge.length > 0) {
+    const fresh = mergeArchive(toArchive(await $.store.get(`${p.prefix}a`)), plan.merge)
+    await $.store.set(`${p.prefix}a`, roundArchive(fresh))
+    p.archive = fresh
+  }
+}
+
+/** Every day of the project, every process summed, this one as it stands now. */
+const projectDays = (p: Proj) => {
+  const out = new Map<string, ProjDay>()
+  for (const [day, rec] of p.base) {
+    const d = emptyDay()
+    addInto(d, rec)
+    out.set(day, d)
+  }
+  for (const [day, rec] of Object.entries(p.days)) {
+    if (p.archive.days[day]?.from.includes(p.pid)) continue
+    let d = out.get(day)
+    if (!d) out.set(day, (d = emptyDay()))
+    addInto(d, rec)
+  }
+  return out
+}
+
+async function initProject($: EngineInterface) {
+  const root = await $.session.root()
+  if (!root) return
+  let pid = await read($, proc)
+  if (!pid) {
+    const made = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+    pid = made
+    await update($, proc, () => made)
+  }
+  const prefix = `proj-1|${root}|`
+  const key = procKey(prefix, pid)
+  if (proj?.key === key) return
+  // A reload (or a session resumed in this process) goes on from what it wrote.
+  const mine = toProc(await $.store.get(key))
+  proj = {
+    root,
+    prefix,
+    key,
+    pid,
+    days: mine.days,
+    dirty: false,
+    syncedAt: 0,
+    compactedAt: 0,
+    archive: { days: {} },
+    others: new Map(),
+    base: new Map(),
+  }
+  // What the session cost before (a resume, a reload) is not this project's new work.
+  costBase = (await $.session.usage().catch(() => null))?.cost?.usd
+  signal()
+  const now = await $.clock.now()
+  await syncProject($, now)
+  await publishProject($, now)
+}
+
+async function publishProject($: EngineInterface, now: number) {
+  const p = proj
+  if (!p) return
+  const days = projectDays(p)
+  const view: ProjectView = {
+    root: p.root,
+    today: sumDays(days, dayKey(now)),
+    week: sumDays(days, dayShift(now, -6)),
+    total: sumDays(days),
+  }
+  await update($, projectView, () => view)
+}
+
+/** A work time: "0m", "45m", "1h20", "152h05". */
+const fmtWork = (ms: number) => {
+  const m = Math.max(0, Math.floor(ms / MIN))
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${two(m % 60)}`
+}
+
+const money = (usd: number) => `$${usd.toFixed(2)}`
+
+/** $ per hour, once there is enough time for it to mean something. */
+const perHour = (usd: number, ms: number) => (ms >= 5 * MIN ? fr(usd / (ms / HOUR), 2) : '–')
+
+/** A span's models by name (ids of one model merged), most costly first. */
+const byModel = (d: ProjDay) => {
+  const out = new Map<string, ProjDay['models'][string]>()
+  for (const [id, m] of Object.entries(d.models)) {
+    const name = prettyModel(id)
+    const t = out.get(name) ?? emptyModel()
+    t.usd += m.usd
+    t.input += m.input
+    t.cacheWrite += m.cacheWrite
+    t.cacheRead += m.cacheRead
+    t.output += m.output
+    out.set(name, t)
+  }
+  return [...out].sort((a, b) => b[1].usd - a[1].usd)
+}
+
+/** A row of the table: cost, work time and its $/h, open time and its $/h. */
+type ProjRow = { label: string; usd: string; work: string; workRate: string; open: string; openRate: string }
+const PROJ_COLS = ['usd', 'work', 'workRate', 'open', 'openRate'] as const
+const projRow = (label: string, d: ProjDay): ProjRow => ({
+  label,
+  usd: money(d.usd),
+  work: fmtWork(d.work),
+  workRate: perHour(d.usd, d.work),
+  open: fmtWork(d.open),
+  openRate: perHour(d.usd, d.open),
+})
+const projHead = (label: string): ProjRow => ({
+  label,
+  usd: 'coût',
+  work: 'travail',
+  workRate: '$/h',
+  open: 'ouvert',
+  openRate: '$/h',
+})
+const colWidths = (rows: ProjRow[]) => ({
+  label: Math.max(0, ...rows.map(r => r.label.length)),
+  ...(Object.fromEntries(PROJ_COLS.map(k => [k, Math.max(0, ...rows.map(r => r[k].length))])) as Record<
+    (typeof PROJ_COLS)[number],
+    number
+  >),
+})
+
+const tilde = (root: string) => root.replace(/^\/home\/[^/]+/, '~').replace(/^[A-Za-z]:\\Users\\[^\\]+/i, '~')
+
+/** "mer. 18 nov.", with the year when it is not this one. */
+const dayLabel = (key: string, now: number) => {
+  const d = new Date(dayTime(key))
+  const year = d.getFullYear() !== new Date(now).getFullYear() ? ` ${d.getFullYear()}` : ''
+  return `${DAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}${year}`
+}
+
+/** /couts: the project's days, latest first, each with its models and their four kinds of tokens. */
+async function coutsText($: EngineInterface) {
+  const p = proj
+  if (!p) return 'shell-watch : pas de projet pour cette session.'
+  const now = await $.clock.now()
+  await syncProject($, now)
+  const days = projectDays(p)
+  const keys = [...days.keys()].sort().reverse()
+  const name = p.root.split(/[\\/]/).filter(Boolean).pop() ?? p.root
+  const out = [
+    `Projet ${name} (${tilde(p.root)}), toutes ses sessions.`,
+    "Coût : estimation en équivalent API (le prix de l'API), pas la facture de l'abonnement.",
+    '',
+  ]
+  if (keys.length === 0) return [...out, "Rien de compté pour l'instant."].join('\n')
+  const total = sumDays(days)
+  const rows = [projHead('jour'), ...keys.map(k => projRow(dayLabel(k, now), days.get(k) ?? emptyDay())), projRow('total', total)]
+  const w = colWidths(rows)
+  w.label = Math.max(w.label, ...[...days.values(), total].flatMap(d => byModel(d).map(([n]) => n.length + 2)))
+  const line = (r: ProjRow) => [r.label.padEnd(w.label), ...PROJ_COLS.map(k => r[k].padStart(w[k]))].join('  ').trimEnd()
+  const models = (d: ProjDay) =>
+    byModel(d).map(([n, m]) =>
+      [
+        `  ${n}`.padEnd(w.label),
+        money(m.usd).padStart(w.usd),
+        `${perHour(m.usd, d.work)} $/h`,
+        `entrée ${fmtTok(m.input)} · écriture cache ${fmtTok(m.cacheWrite)} · lecture cache ${fmtTok(m.cacheRead)} · sortie ${fmtTok(m.output)}`,
+      ].join('  '),
+    )
+  out.push(line(rows[0] as ProjRow))
+  keys.forEach((k, i) => {
+    out.push(line(rows[i + 1] as ProjRow), ...models(days.get(k) ?? emptyDay()))
+  })
+  out.push('', line(rows[rows.length - 1] as ProjRow), ...models(total))
+  return out.join('\n')
+}
+
+async function tickProject($: EngineInterface) {
+  if (!proj) return
+  const now = await $.clock.now()
+  accountTime(now)
+  if (now - proj.syncedAt >= PROJ_SYNC_MS) await syncProject($, now)
+  await publishProject($, now)
+}
+
 // --- tailing -----------------------------------------------------------------
 
 async function readTail($: EngineInterface, file: string): Promise<string[] | null> {
@@ -558,7 +966,17 @@ async function tick($: EngineInterface) {
   if (busy) return
   busy = true
   try {
-    await refreshUsage($)
+    // The usage first (it shares out the cost), then the Projet section's
+    // clocks, which go on even when the usage could not be read.
+    const failed = await refreshUsage($).then(
+      () => null,
+      (err: unknown) => ({ err }),
+    )
+    await tickProject($).catch((err: unknown) => {
+      if (!projFailed) $.ui.log(`shell-watch: project: ${String(err)}`)
+      projFailed = true
+    })
+    if (failed) throw failed.err
     await refreshAgents($).catch(() => undefined)
     const list = await read($, shells)
     const live = list.filter(isLive)
@@ -743,7 +1161,17 @@ export const register: Register = on => {
       name: 'shells',
       description: 'Open the live shells & subscription usage pane',
     })
+    await $.command.register({
+      name: 'couts',
+      description: "This project's cost and work time, day by day and per model (estimate at API prices)",
+    })
     ensureTimer($)
+    // Folded sections stay folded from one session to the next.
+    await safe($, async () => {
+      const v = await $.store.get(FOLD_KEY)
+      if (Array.isArray(v)) await update($, folded, () => v.filter((x): x is Section => SECTIONS.includes(x)))
+    })
+    await safe($, () => initProject($))
     // A new session id (startup, /clear, resume) counts its tokens from zero.
     await safe($, async () => {
       const sid = await $.session.id()
@@ -760,10 +1188,26 @@ export const register: Register = on => {
     timer?.cancel()
     timer = null
     if (histDirty) await safe($, async () => syncHist($, await $.clock.now()))
+    // The last of the cost and the time, written before the process goes.
+    await safe($, async () => {
+      if (!proj) return
+      const now = await $.clock.now()
+      takeCost((await $.session.usage()).cost?.usd, now, true)
+      accountTime(now)
+      proj.dirty = true
+      await syncProject($, now)
+    })
     return next(e)
   })
 
+  on('command.run', { command: 'couts' }, async $ => {
+    signal()
+    const text = await coutsText($).catch((err: unknown) => `shell-watch : ${String(err)}`)
+    return { text, isTextDisplayOnly: true }
+  })
+
   on('command.run', { command: 'shells' }, async $ => {
+    signal()
     ensureTimer($)
     await $.ui.open({ id: PANE, title: TITLE, focus: true, backgroundColor: C.base })
     return { text: 'Shells pane opened.' }
@@ -823,8 +1267,65 @@ export const register: Register = on => {
       const last = activityOf(e as unknown as Record<string, unknown>)
       await safe($, () => putAgents($, list => list.map(a => (a.id === id ? { ...a, tools: a.tools + 1, last } : a))))
     }
-    return next(e)
+    try {
+      return await next(e)
+    } finally {
+      // Refused by the person: the call ends without running.
+      answered(e.tool_use_id)
+    }
   }).catch(($, e, next) => next(e))
+
+  // A call put to a person: its loop waits on them until they answer.
+  on('tool.check', async ($, e, next) => {
+    const r = await next(e)
+    if (r.decision === 'ask' && e.approver === 'person' && e.tool_use_id) asks.set(e.tool_use_id, e.agentId ?? '')
+    return r
+  })
+
+  // Auto mode's classifier settled it: nobody was asked.
+  on('tool.judge', async ($, e, next) => {
+    const r = await next(e)
+    if (r.decision !== 'ask') asks.delete(e.tool_use_id)
+    return r
+  })
+
+  // Allowed: the person said yes (when they were asked).
+  on('tool.run', ($, e, next) => {
+    answered(e.tool_use_id)
+    return next(e)
+  })
+
+  // A loop at work from its turn's start to its end: the main one, a subagent's.
+  on('turn.start', ($, e, next) => {
+    loops.add(e.agentId ?? '')
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      const l = e.agentId ?? ''
+      loops.delete(l)
+      for (const [id, of] of asks) if (of === l) asks.delete(id)
+    }
+  })
+
+  // The person at the prompt: typing, a recalled entry, sending.
+  on('prompt.edit', ($, e, next) => {
+    signal()
+    return next(e)
+  })
+
+  on('prompt.change', ($, e, next) => {
+    signal()
+    return next(e)
+  })
+
+  on('prompt.submit', ($, e, next) => {
+    signal()
+    return next(e)
+  })
 
   // Each model request of the main loop says which effort it asks for, and
   // each response (subagents' too) how many tokens it used.
@@ -841,6 +1342,17 @@ export const register: Register = on => {
     const r = yield* next(e)
     const t = r.usage
     if (t) {
+      // Its $ come with the next reading of the session's total (takeCost).
+      const model = t.model || e.model
+      lastModel = model
+      steps.push({
+        model,
+        w: stepWeight(t),
+        input: t.input_tokens,
+        cacheWrite: t.cache_creation_input_tokens,
+        cacheRead: t.cache_read_input_tokens,
+        output: t.output_tokens,
+      })
       const n = t.input_tokens + t.cache_creation_input_tokens + t.output_tokens
       await safe($, () => addTokens($, n))
       const id = e.agentId
@@ -868,6 +1380,8 @@ export const register: Register = on => {
     const view = await read($, filter)
     const tok = await read($, tokens)
     const runs = await read($, agents)
+    const pv = await read($, projectView)
+    const shut = await read($, folded)
     const width = Math.max(30, (e.props.bodyColumns || e.viewport?.columns || 80) - 2)
     const inner = width - 2
     const now = u.at || Date.now()
@@ -897,7 +1411,31 @@ export const register: Register = on => {
     const fitsBig = project.length > 0 && project.length * (GLYPH_W + 1) - 1 <= inner
     const big = fitsBig ? bigRows(project) : []
     const shade = (i: number) => mix(C.accent, C.mint, project.length > 1 ? i / (project.length - 1) : 0)
-    const home = root.replace(/^\/home\/[^/]+/, '~').replace(/^[A-Za-z]:\\Users\\[^\\]+/i, '~')
+    const home = tilde(root)
+
+    // A click in the pane is a sign the person is there.
+    const press = (fn: () => unknown) => async () => {
+      signal()
+      await fn()
+    }
+
+    // A section's title folds it and unfolds it (▾ open, ▸ folded); a folded
+    // section keeps its title and a short summary.
+    const isShut = (k: Section) => shut.includes(k)
+    const toggle = (k: Section) =>
+      press(async () => {
+        const next = isShut(k) ? shut.filter(x => x !== k) : [...shut, k]
+        await update($, folded, () => next)
+        await $.store.set(FOLD_KEY, next).catch(() => undefined)
+      })
+    const sectionTitle = (k: Section, title: string, note?: string, noteColor: string = C.dim) => (
+      <Button key={`fold-${k}`} plain onPress={toggle(k)}>
+        <Text>
+          <Text color={C.accent} bold>{`${isShut(k) ? '▸' : '▾'} ${title}`}</Text>
+          {note ? <Text color={noteColor}>{`  ${note}`}</Text> : ''}
+        </Text>
+      </Button>
+    )
 
     const live = list.filter(isLive).sort((a, b) => a.startedAt - b.startedAt)
     const ended = list.filter(s => !isLive(s)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
@@ -1023,7 +1561,7 @@ export const register: Register = on => {
           <Button
             key={`row-${s.id}`}
             plain
-            onPress={() => update($, expanded, cur => (cur === s.id ? null : s.id))}
+            onPress={press(() => update($, expanded, cur => (cur === s.id ? null : s.id)))}
           >
             <Text color={p.color} bold>{` ${p.glyph} `}</Text>{' '}
             <Text color={C.sub}>{clock(s.startedAt)}</Text>
@@ -1064,6 +1602,64 @@ export const register: Register = on => {
               )}
             </Box>
           ) : null}
+        </Box>
+      )
+    }
+
+    // Projet: today, 7 days, all of it (cost, work time and its $/h, open time
+    // and its $/h), then each model over all of it: $, its part of the $/h
+    // (they add up to the project's), tokens without cache reads.
+    const projectCard = () => {
+      if (!pv.root) return null
+      const t = pv.total
+      if (isShut('project'))
+        return (
+          <Box flexDirection="column" backgroundColor={C.card} paddingX={1} marginBottom={1}>
+            {sectionTitle('project', 'Projet', `${money(t.usd)} · ${perHour(t.usd, t.work)} $/h travail`)}
+          </Box>
+        )
+      const rows = [projHead(''), projRow('auj.', pv.today), projRow('7 j', pv.week), projRow('total', t)]
+      const w = colWidths(rows)
+      const full = w.label + PROJ_COLS.reduce((s, k) => s + 2 + w[k], 0)
+      // Too narrow: the open time and its $/h go.
+      const cols = full <= inner ? PROJ_COLS : PROJ_COLS.slice(0, 3)
+      const colors: Record<(typeof PROJ_COLS)[number], string> = {
+        usd: C.accent,
+        work: C.text,
+        workRate: C.sub,
+        open: C.sub,
+        openRate: C.dim,
+      }
+      const models = byModel(t).map(([name, m]) => ({
+        name,
+        usd: money(m.usd),
+        rate: `${perHour(m.usd, t.work)} $/h`,
+        tok: `${fmtTok(m.input + m.cacheWrite + m.output)} tok`,
+      }))
+      const mw = (k: 'name' | 'usd' | 'rate' | 'tok') => Math.max(0, ...models.map(m => m[k].length))
+      return (
+        <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1} marginBottom={1}>
+          {sectionTitle('project', 'Projet', "coût estimé au prix de l'API")}
+          <Text> </Text>
+          {rows.map((r, i) => (
+            <Text key={`proj-${i}`} wrap="truncate-end">
+              <Text color={i === 0 ? C.dim : C.sub}>{r.label.padEnd(w.label)}</Text>
+              {cols.map(k => (
+                <Text key={`proj-${i}-${k}`} color={i === 0 ? C.dim : colors[k]} bold={i === 3 && (k === 'usd' || k === 'workRate')}>
+                  {`  ${r[k].padStart(w[k])}`}
+                </Text>
+              ))}
+            </Text>
+          ))}
+          {models.length > 0 ? <Text> </Text> : null}
+          {models.map(m => (
+            <Text key={`proj-m-${m.name}`} wrap="truncate-end">
+              <Text color={C.accent}>{m.name.padEnd(mw('name'))}</Text>
+              <Text color={C.text}>{`  ${m.usd.padStart(mw('usd'))}`}</Text>
+              <Text color={C.sub}>{`  ${m.rate.padStart(mw('rate'))}`}</Text>
+              <Text color={C.dim}>{`  ${m.tok.padStart(mw('tok'))}`}</Text>
+            </Text>
+          ))}
         </Box>
       )
     }
@@ -1134,12 +1730,14 @@ export const register: Register = on => {
             </Text>
           </Box>
         ) : null}
-        <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1} marginBottom={1}>
-          <Text color={C.accent} bold>
-            Abonnement
-          </Text>
+        <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={isShut('usage') ? 0 : 1} marginBottom={1}>
+          {sectionTitle(
+            'usage',
+            'Abonnement',
+            isShut('usage') ? u.limits.map(l => `${kindLabel(l.kind)} ${Math.round(l.percent)}%`).join(' · ') : undefined,
+          )}
           {/* one blank line between every block, to breathe; the windows stay together */}
-          {[
+          {isShut('usage') ? null : [
             u.limits.length === 0 ? (
               <Text key="no-limits" color={C.dim}>Limites inconnues (attend la prochaine réponse de l'API)</Text>
             ) : (
@@ -1195,6 +1793,8 @@ export const register: Register = on => {
           ].flatMap((el, i) => [<Text key={`gap-${i}`}> </Text>, el])}
         </Box>
 
+        {projectCard()}
+
         {(() => {
           // Shown once the session has started an agent; ended ones stay.
           const shown = runs
@@ -1214,24 +1814,21 @@ export const register: Register = on => {
           for (const a of [...liveRoots, ...doneRoots]) walk(a, 0)
           const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, Math.max(1, n - 1))}…` : t)
           return (
-            <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1} marginBottom={1}>
+            <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={isShut('agents') ? 0 : 1} marginBottom={1}>
               <Box flexDirection="row" justifyContent="space-between">
-                <Text>
-                  <Text color={C.accent} bold>
-                    Agents
-                  </Text>
-                  <Text color={C.dim}>
-                    {`  ${nLive > 0 ? `${nLive} en cours` : ''}${nLive > 0 && nDone > 0 ? ' · ' : ''}${nDone > 0 ? `${nDone} terminé${nDone > 1 ? 's' : ''}` : ''}`}
-                  </Text>
-                </Text>
+                {sectionTitle(
+                  'agents',
+                  'Agents',
+                  `${nLive > 0 ? `${nLive} en cours` : ''}${nLive > 0 && nDone > 0 ? ' · ' : ''}${nDone > 0 ? `${nDone} terminé${nDone > 1 ? 's' : ''}` : ''}`,
+                )}
                 {/* Once every agent has ended: clears the list, and the section with it. */}
-                {nLive === 0 ? (
-                  <Button key="agents-clear" plain onPress={() => putAgents($, list => list.filter(isAgentLive))}>
+                {nLive === 0 && !isShut('agents') ? (
+                  <Button key="agents-clear" plain onPress={press(() => putAgents($, list => list.filter(isAgentLive)))}>
                     <Text color={C.dim}>x tout effacer</Text>
                   </Button>
                 ) : null}
               </Box>
-              {ordered.map(({ a, depth }) => {
+              {isShut('agents') ? null : ordered.map(({ a, depth }) => {
                 const isOn = isAgentLive(a)
                 const glyph = isOn ? spin : a.status === 'completed' ? '✓' : a.status === 'killed' ? '■' : '✗'
                 const color = isOn
@@ -1285,7 +1882,7 @@ export const register: Register = on => {
                       <Button
                         key={`agent-rm-${a.id}`}
                         plain
-                        onPress={() => putAgents($, list => list.filter(x => x.id !== a.id))}
+                        onPress={press(() => putAgents($, list => list.filter(x => x.id !== a.id)))}
                       >
                         <Text color={C.dim}> x</Text>
                       </Button>
@@ -1306,13 +1903,18 @@ export const register: Register = on => {
           )
         })()}
 
-        <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1}>
+        <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={isShut('shells') ? 0 : 1}>
           {/* Title + counters; each counter filters the list, a second click shows all. */}
           <Box flexDirection="row" gap={2} flexWrap="wrap">
-            <Text color={C.accent} bold>
-              Shells
-            </Text>
-            {(
+            {sectionTitle(
+              'shells',
+              'Shells',
+              isShut('shells')
+                ? `${list.length} commande${list.length > 1 ? 's' : ''}${live.length > 0 ? ` · ${live.length} en cours` : ''}`
+                : undefined,
+              live.length > 0 ? C.accent : C.dim,
+            )}
+            {isShut('shells') ? null : (
               [
                 { key: 'all', label: 'tous', color: C.sub },
                 { key: 'running', label: 'en cours', color: C.accent },
@@ -1328,7 +1930,7 @@ export const register: Register = on => {
                 <Button
                   key={`filter-${c.key}`}
                   plain
-                  onPress={() => update($, filter, cur => (cur === c.key || c.key === 'all' ? 'all' : c.key))}
+                  onPress={press(() => update($, filter, cur => (cur === c.key || c.key === 'all' ? 'all' : c.key)))}
                 >
                   <Text color={c.n > 0 || isOn ? c.color : C.dim} bold={isOn} underline={isOn}>
                     {`${c.n} ${c.label}`}
@@ -1337,8 +1939,8 @@ export const register: Register = on => {
               )
             })}
           </Box>
-          <Text> </Text>
-          {(() => {
+          {isShut('shells') ? null : <Text> </Text>}
+          {isShut('shells') ? null : (() => {
             const liveShown = live.filter(s => matches(s, view))
             const endedShown = ended.filter(s => matches(s, view))
             const empty =
