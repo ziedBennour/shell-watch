@@ -46,15 +46,20 @@ titre) ; une section pliée le reste d'une session à l'autre.
 
 ### En-tête
 
-Le nom du projet, son dossier en entier, depuis quand la session est ouverte, puis la date
-et l'heure, le modèle de la session et son niveau d'effort, une ligne vide entre chaque.
+```
+mer. 18 nov.  ·  22:31:05          /home/moi/projet  Opus 5.5  ▰▰▰▱▱ moyen
+session depuis 2 h 10 (ouverte à 20:15)
+```
+
+À gauche la date et l'heure ; à droite le dossier du projet, le modèle de la session et son
+niveau d'effort, chacun de sa couleur. Dessous, depuis quand la session est ouverte.
 
 ### Abonnement
 
 ```
-5h     ━━━━━━━━━━  20%  6,0%/h → 43%  +57%  ↻ 3h50 (09:30)
-7j     ━━━━━━━━━━  13%  0,4%/h → 32%  +68%  ↻ 2j 15h (dim. 21:00)
-Fable  ━━━━━━━━━━  17%  0,5%/h → 38%  +62%  ↻ 2j 15h (dim. 20:59)
+5h     ━━━━━━━━━━  20%  +57%  → 43% au reset    ↻ 3h50 (09:30)
+7j     ━━━━━━━━━━  13%  +68%  → 32% au reset    ↻ 2j 15h (dim. 21:00)
+Fable  ━━━━━━━━━━  90%  -26%  vide dans 13h20   ↻ 2j 15h (dim. 20:59)
 
 ctx    ━━━━━━━━━━  41%    82k / 200k
 coût   $3.10 · 2,58 $/h · 2,4k tok/min
@@ -62,23 +67,19 @@ coût   $3.10 · 2,58 $/h · 2,4k tok/min
 
 Une ligne par limite, les colonnes alignées d'une limite à l'autre. Quand le panneau est
 trop étroit (moins de 65 à 70 colonnes environ), chaque limite passe sur deux lignes : la
-barre avec son reset, puis le rythme et la projection en dessous.
+barre avec son reset, puis ce qu'il restera en dessous.
 
 - **5h** et **7j** : les limites de l'abonnement, tous modèles confondus.
 - **Fable** (ou un autre modèle) : la semaine propre à un modèle, quand ton abonnement en a
   une. L'API ne la donne pas : le mod la lit dans `/usage`, toutes les 5 minutes.
 - La barre : verte, orange quand il te restera moins de 10 % au reset à ce rythme (ou que
   la limite tombe avant), rouge à partir de 80 %.
-- Après le pourcentage, le **rythme**, la **projection** et le **reset** :
-  - `6%/h` : la vitesse à laquelle la fenêtre se remplit, en moyenne depuis son début
-    (toute la fenêtre 5h, toute la semaine). Elle apparaît après 10 minutes (5h) ou
-    2 heures (semaine).
-  - sa couleur : gris tant que tu as de la marge, orange quand tu approches du rythme qui
-    t'amènerait pile à 100 % au reset, rouge quand tu le dépasses.
-  - `→ 32%  +68%` : le pourcentage que tu auras au reset si tu gardes ce rythme, puis ce
-    qu'il te restera.
-  - `→ -15:40  -12%` en rouge : à ce rythme, la limite tombe avant le reset, à 15:40
-    (avec le jour si ce n'est pas aujourd'hui), et serait dépassée de 12 % au reset.
+- Après le pourcentage, à ton rythme (la moyenne depuis le début de la fenêtre, connue après
+  10 minutes pour 5h, 2 heures pour une semaine) :
+  - `+57%  → 43% au reset` : en vert, ce qu'il te restera au reset, puis le pourcentage
+    que tu auras atteint.
+  - `-26%  vide dans 13h20` : en rouge, la limite tombe avant le reset, dans 13h20, et
+    serait dépassée de 26 % au reset.
   - `↻ 3h50 (09:30)` : le reset de la fenêtre, dans combien de temps et à quelle heure.
 - **ctx** : le remplissage de la fenêtre de contexte de la session.
 - **coût** : le coût de la session en équivalent API, ce coût par heure, et les tokens
@@ -89,18 +90,29 @@ barre avec son reset, puis le rythme et la projection en dessous.
 ```
 ▾ Projet  coût estimé au prix de l'API
 
-         coût  travail   $/h  ouvert   $/h
-auj.    $4.20     1h20  3,15    2h05  2,01
-7 j    $31.00     9h10  3,38   14h20  2,16
-total  $52.10    15h40  3,33   22h05  2,36
+séance          $1.20   0h40  1,80 $/h
+  Opus 5.5      $1.00         1,50 $/h
+  Sonnet 5.5    $0.20         0,30 $/h
 
-Opus 5.5    $40.10  2,56 $/h  1,2M tok
-Haiku 4.5    $2.00  0,13 $/h  300k tok
+depuis ↻ 7j    $12.40   6h10  2,01 $/h
+  Opus 5.5     $10.00         1,62 $/h
+  Sonnet 5.5    $2.40         0,39 $/h
+
+total          $40.10  21h00  1,91 $/h
+  Opus 5.5     $35.00         1,67 $/h
+  Sonnet 5.5    $5.10         0,24 $/h
 ```
 
 Ce que coûte le projet (le dossier de la session), toutes ses sessions additionnées, celles
-qui tournent en parallèle comprises : aujourd'hui, les 7 derniers jours, et depuis
-l'installation de la version 0.10.0 (rien de rétroactif).
+qui tournent en parallèle comprises, sur trois périodes :
+
+- **séance** : la session en cours, depuis son début ; elle continue après un `/restart` et
+  repart à zéro après `/clear`.
+- **depuis ↻ 7j** : depuis le dernier reset de la limite 7j (à l'heure près). Sans limite
+  connue (clé API) : **7 derniers j**.
+- **total** : depuis l'installation de la version 0.10.0 (rien de rétroactif).
+
+Sur chaque ligne :
 
 - **coût** : une estimation en équivalent API (le coût que donne `/cost`), pas la facture de
   l'abonnement. Chaque hausse va au modèle de la requête qui vient de finir, sous-agents
@@ -112,10 +124,8 @@ l'installation de la version 0.10.0 (rien de rétroactif).
   sous-agent en marche. Claude qui attend ta réponse à une autorisation ou une question ne
   travaille pas ; un shell en fond ou une minuterie seuls non plus. Après 5 min sans rien,
   le compteur s'arrête et ce trou compte 3 min ; il repart au signe suivant.
-- **ouvert** : le temps où la session est ouverte ; une machine en veille ne compte pas.
-- **$/h** : le coût divisé par le temps de travail, puis par le temps ouvert (`–` sous 5 min).
-- Par modèle, sur le total : son coût, sa part du $/h de travail (les parts s'additionnent
-  au $/h du projet) et ses tokens, lectures du cache non comptées.
+- **$/h** : le coût divisé par le temps de travail (`–` sous 5 min). Par modèle, sa part :
+  les parts s'additionnent au $/h de la période.
 
 `/couts` donne le détail jour par jour, chaque modèle avec ses quatre types de tokens
 (entrée, écriture du cache, lecture du cache, sortie).
@@ -161,8 +171,9 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
   sessions et tous les projets : chaque session voit le pourcentage le plus haut relevé
   par les autres.
 - **Projet** : un enregistrement par session (chaque session n'écrit que le sien) dans ce même
-  fichier, écrit chaque minute et à la fermeture ; les jours d'avant-hier et plus anciens
-  sont regroupés en un enregistrement par projet. Les sections pliées y sont aussi gardées.
+  fichier, écrit chaque minute et à la fermeture, avec ses 8 derniers jours heure par heure
+  (pour couper au reset de 7j) ; les jours d'avant-hier et plus anciens sont regroupés en un
+  enregistrement par projet. Les sections pliées y sont aussi gardées.
 - **Shells, agents, tokens** : propres à la session, ils repartent de zéro à chaque démarrage.
 - **`/usage`** : lu par `claude -p --safe-mode --no-session-persistence /usage`, sans
   plugins, sans session enregistrée et sans requête au modèle.
@@ -178,6 +189,8 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
 - Le coût par modèle est une répartition : un coût qui ne vient pas d'une requête de la
   conversation ou d'un sous-agent (le classifieur du mode auto, l'appel au modèle d'un autre
   mod) va à la requête suivante. Le total du projet, lui, est exact au sens de `/cost`.
+- La séance compte les sessions écrites depuis moins de 8 jours : une session reprise plus
+  tard repart de ce qui a été fait depuis sa reprise.
 
 ## Développement
 

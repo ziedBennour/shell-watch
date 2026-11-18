@@ -124,9 +124,12 @@ export type ProjDay = {
 export type ProjectView = {
   /** the session's folder; '' until known */
   root: string
-  today: ProjDay
-  /** today and the 6 days before */
+  /** the current session (since its start, through restarts; /clear starts another) */
+  session: ProjDay
+  /** since the 7-day window's reset, or the last 7 days when it is not known */
   week: ProjDay
+  /** whether `week` starts at the 7-day window's reset */
+  weekReset: boolean
   total: ProjDay
 }
 

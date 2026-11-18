@@ -24,6 +24,8 @@ import {
   dayTime,
   emptyDay,
   emptyModel,
+  hourKey,
+  keptHours,
   mergeArchive,
   mergeDays,
   planCompaction,
@@ -31,6 +33,7 @@ import {
   roundDay,
   stepWeight,
   sumDays,
+  sumSince,
   toArchive,
   toProc,
 } from './project'
@@ -82,8 +85,8 @@ const tokens = atom(
 const agents = atom({ plugin: 'shell-watch', key: 'agents' } as const, [] as AgentRun[], { shape: 'agents-1' })
 const projectView = atom(
   { plugin: 'shell-watch', key: 'project' } as const,
-  { root: '', today: emptyDay(), week: emptyDay(), total: emptyDay() } as ProjectView,
-  { shape: 'project-1' },
+  { root: '', session: emptyDay(), week: emptyDay(), weekReset: false, total: emptyDay() } as ProjectView,
+  { shape: 'project-2' },
 )
 const folded = atom({ plugin: 'shell-watch', key: 'folded' } as const, [] as Section[], { shape: 'folded-1' })
 const proc = atom({ plugin: 'shell-watch', key: 'proc' } as const, '', { shape: 'proc-1' })
@@ -233,20 +236,24 @@ const fmtReset = (iso: string | undefined, now: number) => {
 }
 
 /**
- * A window's pace and reset, cut in cells for a single line:
- * "6%/h", "→ 43%", "+57%", "↻ 3h50 (09:30)";
- * or "→ -15:40", "-12%" when the limit falls before the reset.
+ * A window at this pace, cut in cells for a single line: what is left at the
+ * reset, the % it ends at, the reset: "+57%", "→ 43% au reset", "↻ 3h50 (09:30)";
+ * or "-15%", "vide dans 1h20" when the limit falls before the reset.
  */
-type Cells = { rate: string; proj: string; left: string; hit: boolean; reset: string }
+type Cells = { left: string; proj: string; hit: boolean; reset: string }
 const limitCells = (l: Limit, p: Pace | undefined, now: number): Cells => {
   const t = l.resetsAt ? Date.parse(l.resetsAt) : NaN
   const reset = Number.isNaN(t) ? '' : t <= now ? '↻ imminent' : `↻ ${fmtIn(t - now)} (${fmtAt(t, now)})`
-  if (!p || p.rate === undefined || l.percent >= 100) return { rate: '', proj: '', left: '', hit: false, reset }
-  const rate = `${fmtRate(p.rate)}%/h`
+  if (!p || p.rate === undefined || l.percent >= 100) return { left: '', proj: '', hit: false, reset }
   if (p.hitAt !== undefined)
-    return { rate, proj: `→ -${fmtAt(p.hitAt, now)}`, left: p.over !== undefined ? `-${Math.round(p.over)}%` : '', hit: true, reset }
+    return {
+      left: p.over !== undefined ? `-${Math.round(p.over)}%` : '',
+      proj: `vide dans ${fmtIn(Math.max(0, p.hitAt - now))}`,
+      hit: true,
+      reset,
+    }
   const at = Math.round(p.atReset ?? 0)
-  return { rate, proj: `→ ${at}%`, left: `+${100 - at}%`, hit: false, reset }
+  return { left: `+${100 - at}%`, proj: `→ ${at}% au reset`, hit: false, reset }
 }
 
 const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1)
@@ -277,6 +284,7 @@ const C = {
   mint: '#629f8f', // Vesper's #99FFE4, muted 40% toward the background
   red: '#9f5353', // Vesper's #FF8080, muted 40% toward the background
   orange: '#ff7300',
+  lilac: '#a99be0', // the effort, apart from the folder (accent) and the model (mint)
 } as const
 
 const level = (pct: number) => (pct >= 80 ? C.red : pct >= 50 ? C.accent : C.mint)
@@ -292,8 +300,6 @@ const fmtTokens = (n: number) =>
 /** French decimals: 2,4 */
 const fr = (n: number, digits: number) => n.toFixed(digits).replace('.', ',')
 
-/** A rate in %/h: "0,6", "18" */
-const fmtRate = (n: number) => fr(n, n < 10 ? 1 : 0)
 
 /** A token count with one decimal under 10k: "850", "2,4k", "31k", "1,2M" */
 const fmtTok = (n: number) =>
@@ -601,6 +607,11 @@ type Proj = {
   key: string
   pid: string
   days: Record<string, ProjDay>
+  /** the last days by the hour */
+  hours: Record<string, ProjDay>
+  /** the session counted in `run`, and its total in this process */
+  sid: string
+  run: ProjDay
   dirty: boolean
   syncedAt: number
   compactedAt: number
@@ -625,7 +636,7 @@ let signaled = false
 let activeAt = 0
 let tickAt = 0
 let away = false
-// Work counted since the last activity, per day: what an absence takes back.
+// Work counted since the last activity, per hour: what an absence takes back.
 const gap = new Map<string, number>()
 // Loops in a turn: '' for the main one, a subagent's id; and the calls waiting
 // on a person, with their loop.
@@ -648,7 +659,8 @@ const answered = (id: string | undefined) => {
   if (id && asks.delete(id)) signal()
 }
 
-const dayOf = (p: Proj, day: string) => (p.days[day] ??= emptyDay())
+/** The records a moment counts in: its day, its hour, the session. */
+const recsAt = (p: Proj, now: number) => [(p.days[dayKey(now)] ??= emptyDay()), (p.hours[hourKey(now)] ??= emptyDay()), p.run]
 
 /**
  * Shares the rise of the session's cost between the responses that ended
@@ -670,17 +682,19 @@ function takeCost(usd: number | undefined, now: number, final = false) {
     done.push({ model: lastModel, w: 1, input: 0, cacheWrite: 0, cacheRead: 0, output: 0 })
   }
   costBase = usd
-  const rec = dayOf(proj, dayKey(now))
+  const recs = recsAt(proj, now)
   const total = done.reduce((s, x) => s + x.w, 0)
   for (const s of done) {
     const share = total > 0 ? (delta * s.w) / total : delta / done.length
-    const m = (rec.models[s.model] ??= emptyModel())
-    m.usd += share
-    m.input += s.input
-    m.cacheWrite += s.cacheWrite
-    m.cacheRead += s.cacheRead
-    m.output += s.output
-    rec.usd += share
+    for (const rec of recs) {
+      const m = (rec.models[s.model] ??= emptyModel())
+      m.usd += share
+      m.input += s.input
+      m.cacheWrite += s.cacheWrite
+      m.cacheRead += s.cacheRead
+      m.output += s.output
+      rec.usd += share
+    }
   }
   proj.dirty = true
 }
@@ -699,29 +713,35 @@ function accountTime(now: number) {
     gap.clear()
   }
   if (dt <= 0 || dt > ASLEEP_MS) return
-  const day = dayKey(now)
-  const rec = dayOf(p, day)
-  rec.open += dt
+  const recs = recsAt(p, now)
+  for (const rec of recs) rec.open += dt
   p.dirty = true
   if (away) return
   if (now - activeAt >= AWAY_MS) {
     away = true
-    // The gap counts AWAY_KEEP: the rest comes off, latest day first; days
-    // before yesterday are closed (archived) and stay as they are.
+    // The gap counts AWAY_KEEP: the rest comes off its hours, latest first,
+    // their days and the session; days before yesterday are closed (archived)
+    // and stay as they are.
     let over = [...gap.values()].reduce((s, x) => s + x, 0) - AWAY_KEEP
     const yesterday = dayShift(now, -1)
-    for (const [d, ms] of [...gap].reverse()) {
-      const r = p.days[d]
-      if (over <= 0 || d < yesterday || !r) continue
-      const cut = Math.min(over, ms, r.work)
-      r.work -= cut
+    for (const [h, ms] of [...gap].reverse()) {
+      const d = p.days[h.slice(0, 10)]
+      const hr = p.hours[h]
+      if (over <= 0 || h.slice(0, 10) < yesterday || !d || !hr) continue
+      const cut = Math.min(over, ms, d.work, hr.work)
+      d.work -= cut
+      hr.work -= cut
+      p.run.work = Math.max(0, p.run.work - cut)
       over -= cut
     }
     gap.clear()
     return
   }
-  rec.work += dt
-  if (!active) gap.set(day, (gap.get(day) ?? 0) + dt)
+  for (const rec of recs) rec.work += dt
+  if (!active) {
+    const h = hourKey(now)
+    gap.set(h, (gap.get(h) ?? 0) + dt)
+  }
 }
 
 const procKey = (prefix: string, pid: string) => `${prefix}p|${pid}`
@@ -733,10 +753,9 @@ async function syncProject($: EngineInterface, now: number) {
   p.syncedAt = now
   if (p.dirty) {
     p.dirty = false
-    await $.store.set(p.key, {
-      at: now,
-      days: Object.fromEntries(Object.entries(p.days).map(([k, d]) => [k, roundDay(d)])),
-    })
+    p.hours = keptHours(p.hours, now)
+    const round = (r: Record<string, ProjDay>) => Object.fromEntries(Object.entries(r).map(([k, d]) => [k, roundDay(d)]))
+    await $.store.set(p.key, { at: now, days: round(p.days), hours: round(p.hours), sid: p.sid, run: roundDay(p.run) })
   }
   const keys = (await $.store.keys()).filter(k => k.startsWith(`${p.prefix}p|`) && k !== p.key)
   p.archive = toArchive(await $.store.get(`${p.prefix}a`))
@@ -796,7 +815,16 @@ async function initProject($: EngineInterface) {
   }
   const prefix = `proj-1|${root}|`
   const key = procKey(prefix, pid)
-  if (proj?.key === key) return
+  const sid = await $.session.id()
+  if (proj?.key === key) {
+    // A new session in this process (/clear): its total starts from zero.
+    if (proj.sid !== sid) {
+      proj.sid = sid
+      proj.run = emptyDay()
+      proj.dirty = true
+    }
+    return
+  }
   // A reload (or a session resumed in this process) goes on from what it wrote.
   const mine = toProc(await $.store.get(key))
   proj = {
@@ -805,7 +833,10 @@ async function initProject($: EngineInterface) {
     key,
     pid,
     days: mine.days,
-    dirty: false,
+    hours: mine.hours,
+    sid,
+    run: mine.sid === sid ? mine.run : emptyDay(),
+    dirty: mine.sid !== sid,
     syncedAt: 0,
     compactedAt: 0,
     archive: { days: {} },
@@ -824,10 +855,22 @@ async function publishProject($: EngineInterface, now: number) {
   const p = proj
   if (!p) return
   const days = projectDays(p)
+  const others = [...p.others.values()].map(o => o.rec)
+  // The current session: this process's, and the others' that count for it (a restart).
+  const session = emptyDay()
+  addInto(session, p.run)
+  for (const r of others) if (r.sid && r.sid === p.sid) addInto(session, r.run)
+  // The 7-day window began 7 days before its reset; without it, the last 7 days.
+  const lim = (await read($, usage)).limits
+  const seven = lim.find(l => l.kind === 'seven_day') ?? lim.find(l => l.kind.startsWith('seven_day'))
+  const reset = seven?.resetsAt ? Date.parse(seven.resetsAt) : NaN
+  const weekReset = Number.isFinite(reset)
+  const start = !weekReset ? now - 7 * DAY : reset <= now ? reset : reset - 7 * DAY
   const view: ProjectView = {
     root: p.root,
-    today: sumDays(days, dayKey(now)),
-    week: sumDays(days, dayShift(now, -6)),
+    session,
+    week: sumSince(start, days, [p.hours, ...others.map(r => r.hours)]),
+    weekReset,
     total: sumDays(days),
   }
   await update($, projectView, () => view)
@@ -860,24 +903,20 @@ const byModel = (d: ProjDay) => {
   return [...out].sort((a, b) => b[1].usd - a[1].usd)
 }
 
-/** A row of the table: cost, work time and its $/h, open time and its $/h. */
-type ProjRow = { label: string; usd: string; work: string; workRate: string; open: string; openRate: string }
-const PROJ_COLS = ['usd', 'work', 'workRate', 'open', 'openRate'] as const
+/** A row of the table: cost, work time and its $/h (the time open is not a measure of work). */
+type ProjRow = { label: string; usd: string; work: string; workRate: string }
+const PROJ_COLS = ['usd', 'work', 'workRate'] as const
 const projRow = (label: string, d: ProjDay): ProjRow => ({
   label,
   usd: money(d.usd),
   work: fmtWork(d.work),
   workRate: perHour(d.usd, d.work),
-  open: fmtWork(d.open),
-  openRate: perHour(d.usd, d.open),
 })
 const projHead = (label: string): ProjRow => ({
   label,
   usd: 'coût',
   work: 'travail',
   workRate: '$/h',
-  open: 'ouvert',
-  openRate: '$/h',
 })
 const colWidths = (rows: ProjRow[]) => ({
   label: Math.max(0, ...rows.map(r => r.label.length)),
@@ -1391,12 +1430,11 @@ export const register: Register = on => {
     // A few spaces set the reset (and ctx's tokens) apart from the %.
     const GAP = '   '
     const cells = u.limits.map(l => limitCells(l, u.pace?.[l.kind], now))
-    const colW = (k: 'rate' | 'proj' | 'left' | 'reset') => Math.max(0, ...cells.map(c => c[k].length))
-    const wRate = colW('rate')
+    const colW = (k: 'proj' | 'left' | 'reset') => Math.max(0, ...cells.map(c => c[k].length))
     const wProj = colW('proj')
     const wLeft = colW('left')
     const wReset = colW('reset')
-    const paceW = wRate ? wRate + 1 + wProj + (wLeft ? 2 + wLeft : 0) : 0
+    const paceW = wProj ? (wLeft ? wLeft + 2 : 0) + wProj : 0
     // label 7 + bar + space + "100%" 4, then the pace and the reset, 2 spaces apart
     const lineW = 12 + (paceW ? 2 + paceW : 0) + (wReset ? 2 + wReset : 0)
     const oneLine = inner - lineW >= 8
@@ -1404,9 +1442,8 @@ export const register: Register = on => {
     // Tokens per minute over the session (cache reads left out).
     const tokAvg = tok.since && now - tok.since >= MIN ? tok.total / ((now - tok.since) / MIN) : undefined
 
-    // The project's name and its folder, in full.
+    // The project's folder, in full.
     const root = await $.session.root().catch(() => '')
-    const project = root.split(/[\\/]/).filter(Boolean).pop() ?? ''
 
     // A click in the pane is a sign the person is there.
     const press = (fn: () => unknown) => async () => {
@@ -1471,9 +1508,6 @@ export const register: Register = on => {
       )
     }
 
-    // Under a window's bar: its rate (dim, peach near the pace that just
-    // lasts until the reset, red past it), then the % it ends at and the "+%" left,
-    // or "-" and when it runs out first, then "-%" past 100 at the reset.
     // A window's bar: red from 80 %, orange when less than 10 % would be
     // left at the reset at this pace (or it runs out first), mint otherwise.
     const limitLevel = (l: Limit) => {
@@ -1484,31 +1518,21 @@ export const register: Register = on => {
       return left < 10 ? C.accent : C.mint
     }
 
-    const paceTag = (l: Limit) => {
-      const p = u.pace?.[l.kind]
-      if (!p || p.rate === undefined || l.percent >= 100) return ''
-      const hot = p.rate > p.sustain ? C.red : p.rate > p.sustain * 0.8 ? C.accent : C.dim
-      return (
+    // After the bar, at this pace: what is left at the reset, in mint, then
+    // the % it ends at; or, in red, how far past 100 % and when it runs out.
+    const leftTag = (c: Cells, wl = 0, wp = 0) =>
+      c.proj ? (
         <Text>
-          <Text color={hot}>{`${fmtRate(p.rate)}%/h`}</Text>
-          {p.hitAt !== undefined ? (
-            <Text color={C.red}>{`  →  -${fmtAt(p.hitAt, now)}${p.over !== undefined ? `   →  -${Math.round(p.over)}%` : ''}`}</Text>
-          ) : (
-            // VS Code lifts any grey under its minimum contrast, so the
-            // percentages go a step lighter (sub) to stand above "au reset".
-            <Text>
-              <Text color={C.sub}>{`  →  ${Math.round(p.atReset ?? 0)}%   →  +${100 - Math.round(p.atReset ?? 0)}%`}</Text>
-              <Text color={C.dim}>{' au reset'}</Text>
-            </Text>
-          )}
+          {c.left || wl ? <Text color={c.hit ? C.red : C.mint} bold>{`  ${c.left.padStart(wl)}`}</Text> : ''}
+          {/* VS Code lifts any grey under its minimum contrast: sub, a step lighter */}
+          <Text color={c.hit ? C.red : C.sub}>{`  ${c.proj.padEnd(wp)}`}</Text>
         </Text>
+      ) : (
+        ''
       )
-    }
 
     // The whole window on one line, its cells padded to the widest of the windows.
     const limitLine = (l: Limit, c: Cells) => {
-      const p = u.pace?.[l.kind]
-      const hot = p?.rate === undefined ? C.dim : p.rate > p.sustain ? C.red : p.rate > p.sustain * 0.8 ? C.accent : C.dim
       const b = barParts(l.percent, barW)
       return (
         <Text key={`lim-${l.kind}`}>
@@ -1519,20 +1543,7 @@ export const register: Register = on => {
             {' '}
             {`${Math.round(l.percent)}%`.padStart(4)}
           </Text>
-          {paceW ? (
-            c.rate ? (
-              <Text>
-                <Text color={hot}>{`  ${c.rate.padStart(wRate)}`}</Text>
-                {/* VS Code lifts any grey under its minimum contrast: sub, a step lighter, for the % */}
-                <Text color={c.hit ? C.red : C.sub}>{` ${c.proj.padEnd(wProj)}`}</Text>
-                {wLeft ? <Text color={c.hit ? C.red : C.sub}>{`  ${c.left.padStart(wLeft)}`}</Text> : ''}
-              </Text>
-            ) : (
-              <Text>{' '.repeat(2 + paceW)}</Text>
-            )
-          ) : (
-            ''
-          )}
+          {paceW ? c.proj ? leftTag(c, wLeft, wProj) : <Text>{' '.repeat(2 + paceW)}</Text> : ''}
           {c.reset ? <Text color={C.dim}>{`  ${c.reset}`}</Text> : ''}
         </Text>
       )
@@ -1601,9 +1612,9 @@ export const register: Register = on => {
       )
     }
 
-    // Projet: today, 7 days, all of it (cost, work time and its $/h, open time
-    // and its $/h), then each model over all of it: $, its part of the $/h
-    // (they add up to the project's), tokens without cache reads.
+    // Projet: the session, since the 7-day window's reset, all of it; each with
+    // its cost, its work time and $/h, then its models: $ and their part of the
+    // $/h (they add up to the span's). The tokens are in /couts.
     const projectCard = () => {
       if (!pv.root) return null
       const t = pv.total
@@ -1613,106 +1624,99 @@ export const register: Register = on => {
             {sectionTitle('project', 'Projet', `${money(t.usd)} · ${perHour(t.usd, t.work)} $/h travail`)}
           </Box>
         )
-      const rows = [projHead(''), projRow('auj.', pv.today), projRow('7 j', pv.week), projRow('total', t)]
-      const w = colWidths(rows)
-      const full = w.label + PROJ_COLS.reduce((s, k) => s + 2 + w[k], 0)
-      // Too narrow: the open time and its $/h go.
-      const cols = full <= inner ? PROJ_COLS : PROJ_COLS.slice(0, 3)
-      const colors: Record<(typeof PROJ_COLS)[number], string> = {
-        usd: C.accent,
-        work: C.text,
-        workRate: C.sub,
-        open: C.sub,
-        openRate: C.dim,
+      type Line = { label: string; usd: string; work: string; rate: string }
+      const rate = (usd: number, ms: number) => {
+        const r = perHour(usd, ms)
+        return r === '–' ? r : `${r} $/h`
       }
-      const models = byModel(t).map(([name, m]) => ({
-        name,
-        usd: money(m.usd),
-        rate: `${perHour(m.usd, t.work)} $/h`,
-        tok: `${fmtTok(m.input + m.cacheWrite + m.output)} tok`,
+      const spans: [string, ProjDay][] = [
+        ['séance', pv.session],
+        [pv.weekReset ? 'depuis ↻ 7j' : '7 derniers j', pv.week],
+        ['total', t],
+      ]
+      const blocks = spans.map(([label, d]) => ({
+        head: { label, usd: money(d.usd), work: fmtWork(d.work), rate: rate(d.usd, d.work) } as Line,
+        models: byModel(d).map(
+          ([name, m]): Line => ({ label: `  ${name}`, usd: money(m.usd), work: '', rate: rate(m.usd, d.work) }),
+        ),
       }))
-      const mw = (k: 'name' | 'usd' | 'rate' | 'tok') => Math.max(0, ...models.map(m => m[k].length))
+      const all = blocks.flatMap(b => [b.head, ...b.models])
+      const w = (k: keyof Line) => Math.max(0, ...all.map(r => r[k].length))
+      const line = (r: Line, key: string, head: boolean) => (
+        <Text key={key} wrap="truncate-end">
+          <Text color={head ? C.text : C.accent} bold={head}>
+            {r.label.padEnd(w('label'))}
+          </Text>
+          <Text color={head ? C.accent : C.text} bold={head}>{`  ${r.usd.padStart(w('usd'))}`}</Text>
+          <Text color={C.text}>{`  ${r.work.padStart(w('work'))}`}</Text>
+          <Text color={C.sub}>{`  ${r.rate.padStart(w('rate'))}`}</Text>
+        </Text>
+      )
       return (
         <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1} marginBottom={1}>
           {sectionTitle('project', 'Projet', "coût estimé au prix de l'API")}
-          <Text> </Text>
-          {rows.map((r, i) => (
-            <Text key={`proj-${i}`} wrap="truncate-end">
-              <Text color={i === 0 ? C.dim : C.sub}>{r.label.padEnd(w.label)}</Text>
-              {cols.map(k => (
-                <Text key={`proj-${i}-${k}`} color={i === 0 ? C.dim : colors[k]} bold={i === 3 && (k === 'usd' || k === 'workRate')}>
-                  {`  ${r[k].padStart(w[k])}`}
-                </Text>
-              ))}
-            </Text>
-          ))}
-          {models.length > 0 ? <Text> </Text> : null}
-          {models.map(m => (
-            <Text key={`proj-m-${m.name}`} wrap="truncate-end">
-              <Text color={C.accent}>{m.name.padEnd(mw('name'))}</Text>
-              <Text color={C.text}>{`  ${m.usd.padStart(mw('usd'))}`}</Text>
-              <Text color={C.sub}>{`  ${m.rate.padStart(mw('rate'))}`}</Text>
-              <Text color={C.dim}>{`  ${m.tok.padStart(mw('tok'))}`}</Text>
-            </Text>
-          ))}
+          {blocks.flatMap((b, i) => [
+            <Text key={`proj-gap-${i}`}> </Text>,
+            line(b.head, `proj-${i}`, true),
+            ...b.models.map((m, j) => line(m, `proj-${i}-${j}`, false)),
+          ])}
         </Box>
       )
     }
 
     return (
       <Box flexDirection="column" flexGrow={1} backgroundColor={C.base} paddingX={1} paddingY={1}>
-        {project ? (
-          // One blank line between the lines, to read them at a glance.
-          <Box flexDirection="column" alignItems="center" marginBottom={1}>
-            <Text color={C.accent} bold>
-              {project}
-            </Text>
-            <Text> </Text>
-            <Text color={C.sub} wrap="truncate-start">
-              {root}
-            </Text>
-            <Text> </Text>
-            {u.startedAt ? (
-              <Text color={C.dim}>
-                {'session depuis '}
-                <Text color={C.sub} bold>
-                  {fmtSince(now - u.startedAt)}
+        {/* the date and time on the left; on the right the folder, the model and
+            its effort, each its own color; the session's age under them */}
+        <Box flexDirection="column" marginBottom={1}>
+          <Box flexDirection="row" justifyContent="space-between">
+            <Box flexShrink={0}>
+              <Text>
+                <Text color={C.sub}>{fmtDate(now)}</Text>
+                <Text color={C.dim}>{'  ·  '}</Text>
+                <Text color={C.text} bold>
+                  {clock(now)}
                 </Text>
-                {` (ouverte à ${clockHM(u.startedAt)})`}
               </Text>
-            ) : null}
-            {u.startedAt ? <Text> </Text> : null}
-            <Text>
-              <Text color={C.sub}>{fmtDate(now)}</Text>
-              <Text color={C.dim}>{'  ·  '}</Text>
-              <Text color={C.text} bold>
-                {clock(now)}
-              </Text>
-              {u.model ? (
-                <Text>
-                  <Text color={C.dim}>{'  ·  '}</Text>
+            </Box>
+            <Box flexShrink={1} marginLeft={2}>
+              <Text wrap="truncate-start">
+                {root ? (
                   <Text color={C.accent} bold>
-                    {prettyModel(u.model)}
+                    {root}
                   </Text>
-                </Text>
-              ) : (
-                ''
-              )}
-              {u.effort ? (
-                <Text>
-                  <Text color={C.dim}>{'  ·  effort '}</Text>
-                  <Text color={C.accent}>
-                    {'▰'.repeat(EFFORT[u.effort]?.level ?? 0)}
+                ) : (
+                  ''
+                )}
+                {u.model ? (
+                  <Text color={C.mint} bold>
+                    {`  ${prettyModel(u.model)}`}
                   </Text>
-                  <Text color={C.track}>{'▰'.repeat(EFFORT[u.effort] ? 5 - (EFFORT[u.effort]?.level ?? 0) : 0)}</Text>
-                  <Text color={C.sub}> {EFFORT[u.effort]?.label ?? u.effort}</Text>
-                </Text>
-              ) : (
-                <Text color={C.dim}>{'  ·  effort ?'}</Text>
-              )}
-            </Text>
+                ) : (
+                  ''
+                )}
+                {u.effort ? (
+                  <Text>
+                    <Text color={C.lilac}>{`  ${'▰'.repeat(EFFORT[u.effort]?.level ?? 0)}`}</Text>
+                    <Text color={C.track}>{'▰'.repeat(EFFORT[u.effort] ? 5 - (EFFORT[u.effort]?.level ?? 0) : 0)}</Text>
+                    <Text color={C.lilac}> {EFFORT[u.effort]?.label ?? u.effort}</Text>
+                  </Text>
+                ) : (
+                  <Text color={C.dim}>{'  effort ?'}</Text>
+                )}
+              </Text>
+            </Box>
           </Box>
-        ) : null}
+          {u.startedAt ? (
+            <Text color={C.dim}>
+              {'session depuis '}
+              <Text color={C.sub} bold>
+                {fmtSince(now - u.startedAt)}
+              </Text>
+              {` (ouverte à ${clockHM(u.startedAt)})`}
+            </Text>
+          ) : null}
+        </Box>
         <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={isShut('usage') ? 0 : 1} marginBottom={1}>
           {sectionTitle(
             'usage',
@@ -1732,10 +1736,10 @@ export const register: Register = on => {
                     // the bar and its reset, then the pace on a line of its own
                     <Box key={`lim-${l.kind}`} flexDirection="column">
                       {meter(kindLabel(l.kind), l.percent, limitLevel(l), GAP + fmtReset(l.resetsAt, now))}
-                      {paceTag(l) ? (
+                      {(cells[i] as Cells).proj ? (
                         <Text>
-                          <Text>{' '.repeat(7)}</Text>
-                          {paceTag(l)}
+                          <Text>{' '.repeat(5)}</Text>
+                          {leftTag(cells[i] as Cells)}
                         </Text>
                       ) : null}
                     </Box>

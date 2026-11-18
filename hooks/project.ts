@@ -10,6 +10,12 @@ import type { ModelDay, ProjDay } from '../types'
 // A day a process key still has while the archive names it is skipped, so a
 // move counts once, and a process deletes its own day only on a later pass that
 // still finds it in the archive (a write lost to a race is merged again).
+//
+// A process also keeps its last 8 days by the hour (what the 7-day window's
+// first day needs, cut at its reset), and its session's total with that
+// session's id (what the current session needs: the processes of one session,
+// a resume after a restart, add up). A dead process's key stays while it
+// holds such hours.
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -22,6 +28,7 @@ const obj = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0)
 const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/
+const HOUR_KEY = /^\d{4}-\d{2}-\d{2} \d{2}$/
 
 /** A stored day read back, every field checked. */
 export const toDay = (v: unknown): ProjDay => {
@@ -40,15 +47,33 @@ export const toDay = (v: unknown): ProjDay => {
   return d
 }
 
-const toDays = (v: unknown): Record<string, ProjDay> => {
+const toDays = (v: unknown, key = DAY_KEY): Record<string, ProjDay> => {
   const out: Record<string, ProjDay> = {}
-  for (const [k, d] of Object.entries(obj(v))) if (DAY_KEY.test(k)) out[k] = toDay(d)
+  for (const [k, d] of Object.entries(obj(v))) if (key.test(k)) out[k] = toDay(d)
   return out
 }
 
-/** One process's record: when it last wrote, and its days. */
-export type ProcRec = { at: number; days: Record<string, ProjDay> }
-export const toProc = (v: unknown): ProcRec => ({ at: num(obj(v).at), days: toDays(obj(v).days) })
+/**
+ * One process's record: when it last wrote, its days, its last days by the
+ * hour, and the total of the session it counts for (`sid`).
+ */
+export type ProcRec = {
+  at: number
+  days: Record<string, ProjDay>
+  hours: Record<string, ProjDay>
+  sid: string
+  run: ProjDay
+}
+export const toProc = (v: unknown): ProcRec => {
+  const o = obj(v)
+  return {
+    at: num(o.at),
+    days: toDays(o.days),
+    hours: toDays(o.hours, HOUR_KEY),
+    sid: typeof o.sid === 'string' ? o.sid : '',
+    run: toDay(o.run),
+  }
+}
 
 /** A project's archived days, each with the processes it holds. */
 export type Archive = { days: Record<string, { from: string[]; rec: ProjDay }> }
@@ -104,6 +129,9 @@ export const dayKey = (ms: number) => {
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`
 }
 
+/** The local hour of a time: "2026-11-18 21". */
+export const hourKey = (ms: number) => `${dayKey(ms)} ${two(new Date(ms).getHours())}`
+
 /** The day `n` days from the one of `ms` (n < 0: before). */
 export const dayShift = (ms: number, n: number) => {
   const d = new Date(ms)
@@ -141,6 +169,29 @@ export const sumDays = (days: ReadonlyMap<string, ProjDay>, from?: string) => {
 /** A process whose key was not written for this long has ended. */
 export const DEAD_MS = 2 * DAY
 
+/** Hours are kept for the days from this one on: the 7-day window's first day and a margin. */
+export const hoursFrom = (now: number) => dayShift(now, -8)
+
+/** The hours still kept. */
+export const keptHours = (hours: Record<string, ProjDay>, now: number) => {
+  const from = hoursFrom(now)
+  return Object.fromEntries(Object.entries(hours).filter(([h]) => h.slice(0, 10) >= from))
+}
+
+/**
+ * The project since `start`: the whole days after its day, then that day's
+ * hours from the one `start` falls in (a day recorded before hours were kept
+ * counts from the next one).
+ */
+export const sumSince = (start: number, days: ReadonlyMap<string, ProjDay>, hours: Iterable<Record<string, ProjDay>>) => {
+  const out = emptyDay()
+  const first = dayKey(start)
+  const from = hourKey(start)
+  for (const [day, rec] of days) if (day > first) addInto(out, rec)
+  for (const hs of hours) for (const [h, rec] of Object.entries(hs)) if (h.slice(0, 10) === first && h >= from) addInto(out, rec)
+  return out
+}
+
 /**
  * What a pass of compaction does, decided from what was read: the days to
  * merge into the archive, the days a process can drop, the keys to delete.
@@ -161,13 +212,14 @@ export const planCompaction = (
     if (held(mine.pid, day)) drop.push(day)
     else merge.push({ pid: mine.pid, day, rec })
   }
+  const hourDay = hoursFrom(now)
   for (const [key, { pid, rec }] of others) {
     if (rec.at > now - DEAD_MS) continue
     const days = Object.keys(rec.days)
     if (days.some(d => d >= yesterday)) continue
     const left = days.filter(d => !held(pid, d))
-    if (left.length === 0) remove.push(key)
-    else for (const day of left) merge.push({ pid, day, rec: rec.days[day] as ProjDay })
+    if (left.length > 0) for (const day of left) merge.push({ pid, day, rec: rec.days[day] as ProjDay })
+    else if (!Object.keys(rec.hours).some(h => h.slice(0, 10) >= hourDay)) remove.push(key)
   }
   return { merge, drop, remove }
 }
