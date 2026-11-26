@@ -194,6 +194,12 @@ son de notification du système : celui de Windows (`Windows Notify System Gener
 
 Le choix est gardé d'une session à l'autre. Sous Linux, un mp3 passe par `ffplay`.
 
+**Sur une machine distante (SSH, un VPS)**, le son joué là-bas ne s'entendrait pas : le mod
+fait sonner ton terminal à la place, par la notification de Claude Code, que SSH ramène. Pour
+qu'elle sonne : `/config` → Notifications → `terminal_bell` (sur la machine distante), puis le
+son de cloche de ton terminal ; Windows Terminal le prend dans `bellSound` du profil, un
+fichier wav ou mp3 à toi.
+
 ## Où sont les données
 
 - **Historique des limites** : chaque relevé des fenêtres 5h / 7j / Fable est gardé 8 jours

@@ -1464,8 +1464,39 @@ async function chosenSound($: EngineInterface) {
   return soundFile
 }
 
+// Over SSH the machine's player plays where nobody hears it: the person's own
+// terminal rings instead, by Claude Code's notification (its bell under
+// `terminal_bell`, carried back over SSH). Said once per load when it can't ring.
+let remote: boolean | undefined
+let remoteHinted = false
+const BELLS: readonly string[] = ['terminal_bell', 'iterm2_with_bell']
+
+async function isRemote($: EngineInterface) {
+  if (remote === undefined) {
+    const argv =
+      (await system($)) === 'Windows_NT'
+        ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', '"$env:SSH_CONNECTION$env:SSH_TTY"']
+        : ['sh', '-c', 'printf %s "$SSH_CONNECTION$SSH_TTY"']
+    const r = await $.process.run(argv).catch(() => null)
+    remote = !!r?.stdout.trim()
+  }
+  return remote
+}
+
+async function ringRemote($: EngineInterface) {
+  const r = await $.ui.notify('Travail terminé', { title: 'Claude Code' }).catch(() => null)
+  if (r?.isSent && BELLS.includes(r.channel)) return
+  if (remoteHinted) return
+  remoteHinted = true
+  $.ui.log(
+    'shell-watch : session SSH, le son ne peut pas jouer sur cette machine : il passe par la cloche de ton terminal. ' +
+      'Pour l\'entendre : /config → Notifications → terminal_bell, puis dans ton terminal le son de cloche (Windows Terminal : bellSound du profil).',
+  )
+}
+
 async function playDone($: EngineInterface) {
   if (!(await isSoundOn($))) return
+  if (await isRemote($)) return ringRemote($)
   const chosen = await chosenSound($)
   // A copy gone (the data folder emptied): the system's sound.
   const file = chosen && (await $.fs.exists(chosen.path).catch(() => false)) ? chosen.path : undefined
@@ -1494,6 +1525,8 @@ async function chooseSound($: EngineInterface, arg: string) {
   const name = src.split(/[\\/]/).pop() ?? src
   const ext = /\.([A-Za-z0-9]+)$/.exec(name)?.[1]?.toLowerCase()
   if (!ext || !SOUND_EXTS.includes(ext)) return `shell-watch : « ${name} » n'est pas un son (${SOUND_EXTS.join(', ')}).`
+  if (await isRemote($))
+    return "shell-watch : session SSH, le son se joue par la cloche de ton terminal : choisis-le dans ton terminal (Windows Terminal : bellSound du profil)."
   const data = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
   if (!data) return "shell-watch : pas de dossier de données pour garder le son."
   const dst = join(data, `son.${ext}`)
