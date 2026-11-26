@@ -164,6 +164,13 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
 - Le mod garde les 200 dernières commandes et affiche les 50 dernières terminées.
 - Le titre d'une commande est sa description quand Claude en donne une, sinon la commande.
 
+### Son de fin de travail
+
+Quand Claude a fini (la fin d'un tour, sauf si tu l'as interrompu ; pas les sous-agents), le
+son de notification du système : celui de Windows (`Windows Notify System Generic.wav`),
+`Glass` sur macOS, `complete.oga` (freedesktop) sur Linux. `/son` le coupe ou le remet ;
+le choix est gardé d'une session à l'autre.
+
 ## Où sont les données
 
 - **Historique des limites** : chaque relevé des fenêtres 5h / 7j / Fable est gardé 8 jours

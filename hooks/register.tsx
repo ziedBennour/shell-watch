@@ -1303,6 +1303,35 @@ async function refreshAgents($: EngineInterface) {
   )
 }
 
+// --- a sound when Claude is done ---------------------------------------------------
+//
+// The end of a main-loop turn that was not interrupted plays the system's own
+// notification sound. $.audio.play plays nothing in a Windows or Linux
+// terminal: the system's player does it, by `$.process.run`. /son switches it.
+
+const SOUND_KEY = 'sound-1'
+let soundOn: boolean | null = null
+let sysname = ''
+
+const WIN_SOUND = "(New-Object Media.SoundPlayer (Join-Path $env:WINDIR 'Media/Windows Notify System Generic.wav')).PlaySync()"
+
+async function isSoundOn($: EngineInterface) {
+  if (soundOn === null) soundOn = (await $.store.get(SOUND_KEY)) !== false
+  return soundOn
+}
+
+async function playDone($: EngineInterface) {
+  if (!(await isSoundOn($))) return
+  if (!sysname) sysname = (await $.session.machine().catch(() => null))?.sysname ?? '?'
+  const argv =
+    sysname === 'Windows_NT'
+      ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', WIN_SOUND]
+      : sysname === 'Darwin'
+        ? ['afplay', '/System/Library/Sounds/Glass.aiff']
+        : ['paplay', '/usr/share/sounds/freedesktop/stereo/complete.oga']
+  await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => undefined)
+}
+
 // --- the module -----------------------------------------------------------------
 
 export const register: Register = on => {
@@ -1310,6 +1339,10 @@ export const register: Register = on => {
     await $.command.register({
       name: 'shells',
       description: 'Open the live shells & subscription usage pane',
+    })
+    await $.command.register({
+      name: 'son',
+      description: 'Switch the sound played when Claude is done (on / off)',
     })
     await $.command.register({
       name: 'couts',
@@ -1354,6 +1387,15 @@ export const register: Register = on => {
     signal()
     const text = await coutsText($).catch((err: unknown) => `shell-watch : ${String(err)}`)
     return { text, isTextDisplayOnly: true }
+  })
+
+  on('command.run', { command: 'son' }, async $ => {
+    signal()
+    const next = !(await isSoundOn($))
+    soundOn = next
+    await $.store.set(SOUND_KEY, next)
+    if (next) void playDone($)
+    return { text: next ? 'Son de fin de travail : activé.' : 'Son de fin de travail : coupé.', isTextDisplayOnly: true }
   })
 
   on('command.run', { command: 'shells' }, async $ => {
@@ -1460,6 +1502,8 @@ export const register: Register = on => {
       const l = e.agentId ?? ''
       loops.delete(l)
       for (const [id, of] of asks) if (of === l) asks.delete(id)
+      // Claude is done: a sound, off the hook (the player takes a moment).
+      if (e.agentId === undefined && !e.isAborted) void playDone($).catch(() => undefined)
     }
   })
 
