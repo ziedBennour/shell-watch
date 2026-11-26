@@ -2136,56 +2136,56 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" flexGrow={1} backgroundColor={C.base} paddingX={1} paddingY={1}>
-        {/* the date and time on the left; on the right the folder, the model and
-            its effort, each its own color; the session's age under them */}
-        <Box flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" justifyContent="space-between">
-            <Box flexShrink={0}>
-              <Text>
-                <Text color={C.sub}>{fmtDate(now)}</Text>
-                <Text color={C.dim}>{'  ·  '}</Text>
-                <Text color={C.text} bold>
-                  {clock(now)}
+        {/* on the left the folder, the model and its effort under it; on the
+            right the date and time, the session's age under them */}
+        <Box flexDirection="row" justifyContent="space-between" marginBottom={1}>
+          <Box flexDirection="column" flexShrink={1}>
+            <Text wrap="truncate-start">
+              {root ? (
+                <Text color={C.accent} bold>
+                  {root}
                 </Text>
-              </Text>
-            </Box>
-            <Box flexShrink={1} marginLeft={2}>
-              <Text wrap="truncate-start">
-                {root ? (
-                  <Text color={C.accent} bold>
-                    {root}
-                  </Text>
-                ) : (
-                  ''
-                )}
-                {u.model ? (
-                  <Text color={C.mint} bold>
-                    {`  ${prettyModel(u.model)}`}
-                  </Text>
-                ) : (
-                  ''
-                )}
-                {u.effort ? (
-                  <Text>
-                    <Text color={C.lilac}>{`  ${'▰'.repeat(EFFORT[u.effort]?.level ?? 0)}`}</Text>
-                    <Text color={C.track}>{'▰'.repeat(EFFORT[u.effort] ? 5 - (EFFORT[u.effort]?.level ?? 0) : 0)}</Text>
-                    <Text color={C.lilac}> {EFFORT[u.effort]?.label ?? u.effort}</Text>
-                  </Text>
-                ) : (
-                  <Text color={C.dim}>{'  effort ?'}</Text>
-                )}
-              </Text>
-            </Box>
-          </Box>
-          {u.startedAt ? (
-            <Text color={C.dim}>
-              {'session depuis '}
-              <Text color={C.sub} bold>
-                {fmtSince(now - u.startedAt)}
-              </Text>
-              {` (ouverte à ${clockHM(u.startedAt)})`}
+              ) : (
+                ' '
+              )}
             </Text>
-          ) : null}
+            <Text wrap="truncate-end">
+              {u.model ? (
+                <Text color={C.mint} bold>
+                  {prettyModel(u.model)}
+                </Text>
+              ) : (
+                <Text color={C.dim}>modèle ?</Text>
+              )}
+              {u.effort ? (
+                <Text>
+                  <Text color={C.lilac}>{`  ${'▰'.repeat(EFFORT[u.effort]?.level ?? 0)}`}</Text>
+                  <Text color={C.track}>{'▰'.repeat(EFFORT[u.effort] ? 5 - (EFFORT[u.effort]?.level ?? 0) : 0)}</Text>
+                  <Text color={C.lilac}> {EFFORT[u.effort]?.label ?? u.effort}</Text>
+                </Text>
+              ) : (
+                <Text color={C.dim}>{'  effort ?'}</Text>
+              )}
+            </Text>
+          </Box>
+          <Box flexDirection="column" flexShrink={0} alignItems="flex-end" marginLeft={2}>
+            <Text>
+              <Text color={C.sub}>{fmtDate(now)}</Text>
+              <Text color={C.dim}>{'  ·  '}</Text>
+              <Text color={C.text} bold>
+                {clock(now)}
+              </Text>
+            </Text>
+            {u.startedAt ? (
+              <Text color={C.dim}>
+                {'session depuis '}
+                <Text color={C.sub} bold>
+                  {fmtSince(now - u.startedAt)}
+                </Text>
+                {` (ouverte à ${clockHM(u.startedAt)})`}
+              </Text>
+            ) : null}
+          </Box>
         </Box>
         <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={isShut('usage') ? 0 : 1} marginBottom={1}>
           {sectionTitle(

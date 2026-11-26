@@ -55,12 +55,13 @@ titre) ; une section pliée le reste d'une session à l'autre.
 ### En-tête
 
 ```
-mer. 18 nov.  ·  22:31:05          /home/moi/projet  Opus 5.5  ▰▰▰▱▱ moyen
-session depuis 2 h 10 (ouverte à 20:15)
+/home/moi/projet                              mer. 18 nov.  ·  22:31:05
+Opus 5.5  ▰▰▰▱▱ moyen              session depuis 2 h 10 (ouverte à 20:15)
 ```
 
-À gauche la date et l'heure ; à droite le dossier du projet, le modèle de la session et son
-niveau d'effort, chacun de sa couleur. Dessous, depuis quand la session est ouverte.
+À gauche le dossier du projet, et dessous le modèle de la session et son niveau d'effort,
+chacun de sa couleur. À droite la date et l'heure, et dessous depuis quand la session est
+ouverte.
 
 ### Abonnement
 
