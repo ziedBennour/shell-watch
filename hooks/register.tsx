@@ -17,15 +17,22 @@ import type {
 } from '../types'
 import {
   type Archive,
+  type GitEntry,
   type ProcRec,
+  GIT_DIR,
   addInto,
   dayKey,
   dayShift,
   dayTime,
   emptyDay,
   emptyModel,
+  entryDays,
+  firstDay,
+  foreignEntries,
+  gitFileText,
   hourKey,
   keptHours,
+  localEntries,
   mergeArchive,
   mergeDays,
   planCompaction,
@@ -35,6 +42,7 @@ import {
   sumDays,
   sumSince,
   toArchive,
+  toGitEntries,
   toProc,
 } from './project'
 
@@ -85,8 +93,8 @@ const tokens = atom(
 const agents = atom({ plugin: 'shell-watch', key: 'agents' } as const, [] as AgentRun[], { shape: 'agents-1' })
 const projectView = atom(
   { plugin: 'shell-watch', key: 'project' } as const,
-  { root: '', session: emptyDay(), week: emptyDay(), weekReset: false, total: emptyDay() } as ProjectView,
-  { shape: 'project-2' },
+  { root: '', session: emptyDay(), week: emptyDay(), weekReset: false, total: emptyDay(), since: '' } as ProjectView,
+  { shape: 'project-3' },
 )
 const folded = atom({ plugin: 'shell-watch', key: 'folded' } as const, [] as Section[], { shape: 'folded-1' })
 const proc = atom({ plugin: 'shell-watch', key: 'proc' } as const, '', { shape: 'proc-1' })
@@ -237,23 +245,23 @@ const fmtReset = (iso: string | undefined, now: number) => {
 
 /**
  * A window at this pace, cut in cells for a single line: what is left at the
- * reset, the % it ends at, the reset: "+57%", "→ 43% au reset", "↻ 3h50 (09:30)";
- * or "-15%", "vide dans 1h20" when the limit falls before the reset.
+ * reset ("+57%"), or how far past 100 % it goes when the limit falls first
+ * ("-15%"), and when the reset is: "dans 3h50 (09:30)".
  */
-type Cells = { left: string; proj: string; hit: boolean; reset: string }
+type Cells = { left: string; hit: boolean; reset: string }
 const limitCells = (l: Limit, p: Pace | undefined, now: number): Cells => {
   const t = l.resetsAt ? Date.parse(l.resetsAt) : NaN
-  const reset = Number.isNaN(t) ? '' : t <= now ? '↻ imminent' : `↻ ${fmtIn(t - now)} (${fmtAt(t, now)})`
-  if (!p || p.rate === undefined || l.percent >= 100) return { left: '', proj: '', hit: false, reset }
-  if (p.hitAt !== undefined)
-    return {
-      left: p.over !== undefined ? `-${Math.round(p.over)}%` : '',
-      proj: `vide dans ${fmtIn(Math.max(0, p.hitAt - now))}`,
-      hit: true,
-      reset,
-    }
-  const at = Math.round(p.atReset ?? 0)
-  return { left: `+${100 - at}%`, proj: `→ ${at}% au reset`, hit: false, reset }
+  const reset = Number.isNaN(t) ? '' : t <= now ? 'imminent' : `dans ${fmtIn(t - now)} (${fmtAt(t, now)})`
+  if (!p || p.rate === undefined || l.percent >= 100) return { left: '', hit: false, reset }
+  if (p.hitAt !== undefined) return { left: p.over !== undefined ? `-${Math.round(p.over)}%` : '', hit: true, reset }
+  return { left: `+${100 - Math.round(p.atReset ?? 0)}%`, hit: false, reset }
+}
+
+/** After the %: "+57% au reset dans 3h50 (09:30)", "reset" aligned on the others' when there is no pace. */
+const limitTail = (c: Cells, wl: number) => {
+  if (!c.left && !c.reset) return ''
+  const lead = c.left ? `${c.left.padStart(wl)} au ` : wl ? ' '.repeat(wl + 4) : ''
+  return `${lead}reset${c.reset ? ` ${c.reset}` : ''}`
 }
 
 const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1)
@@ -620,8 +628,15 @@ type Proj = {
   others: Map<string, { pid: string; rec: ProcRec }>
   /** the archive and the other processes, merged by day: all but this process */
   base: Map<string, ProjDay>
+  /** the repository's files (other machines, an earlier clone) that this machine's store does not hold, by day */
+  imported: Map<string, ProjDay>
+  /** each file of the repository's folder as last read: its size and time, its entries */
+  gitFiles: Map<string, { size: number; mtimeMs: number; entries: GitEntry[] }>
 }
 let proj: Proj | null = null
+// This machine's id: its file's name in each repository. Kept in $.store.
+const MACHINE_KEY = 'machine-1'
+let machineId = ''
 let projFailed = false
 
 // The session's cost as last shared out, and the responses since, waiting for
@@ -766,7 +781,86 @@ async function syncProject($: EngineInterface, now: number) {
     p.archive,
     [...p.others.values()].map(o => [o.pid, o.rec.days] as const),
   )
+  // The repository's files are a bonus: one that fails leaves the rest alone.
+  await readGitFiles($, p).catch(() => undefined)
+  p.imported = entryDays(foreignEntries(localOf(p), [...p.gitFiles.values()].map(f => f.entries)))
 }
+
+/** What this machine's store holds for the project: the archive, every process (this one as it stands). */
+const localOf = (p: Proj) =>
+  localEntries(p.archive, [[p.pid, p.days] as const, ...[...p.others.values()].map(o => [o.pid, o.rec.days] as const)])
+
+const gitPath = (p: Proj, name?: string) => (name ? join(p.root, GIT_DIR, name) : join(p.root, GIT_DIR))
+
+/** Reads the repository's folder, each file again only when it changed. */
+async function readGitFiles($: EngineInterface, p: Proj) {
+  const list = (await $.fs.list(gitPath(p)).catch(() => [])).filter(f => f.kind === 'file' && f.name.endsWith('.json'))
+  const next = new Map<string, { size: number; mtimeMs: number; entries: GitEntry[] }>()
+  for (const f of list) {
+    const had = p.gitFiles.get(f.name)
+    if (had && had.size === f.size && had.mtimeMs === f.mtimeMs) {
+      next.set(f.name, had)
+      continue
+    }
+    const text = await $.fs.read(gitPath(p, f.name)).catch(() => '')
+    let entries: GitEntry[] = []
+    try {
+      entries = toGitEntries(JSON.parse(text))
+    } catch {
+      // a file cut mid-merge: none of its entries until it reads again
+    }
+    next.set(f.name, { size: f.size, mtimeMs: f.mtimeMs, entries })
+  }
+  p.gitFiles = next
+}
+
+async function ensureMachine($: EngineInterface) {
+  if (machineId) return machineId
+  const stored = await $.store.get(MACHINE_KEY)
+  if (typeof stored === 'string' && /^[a-z0-9]{6,}$/.test(stored)) return (machineId = stored)
+  const made = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+  await $.store.set(MACHINE_KEY, made)
+  return (machineId = made)
+}
+
+// Whether the project's folder is in a git work tree, per folder.
+const inGit = new Map<string, boolean>()
+
+/**
+ * Before a commit Claude runs: writes this machine's file in the repository
+ * and stages it, so the commit carries the project's records.
+ */
+async function exportGit($: EngineInterface) {
+  const p = proj
+  if (!p) return
+  let isRepo = inGit.get(p.root)
+  if (isRepo === undefined) {
+    const r = await $.process.run(['git', 'rev-parse', '--is-inside-work-tree'], { cwd: p.root, timeoutMs: 5000 })
+    isRepo = r.exitCode === 0 && r.stdout.trim() === 'true'
+    inGit.set(p.root, isRepo)
+  }
+  if (!isRepo) return
+  const now = await $.clock.now()
+  p.dirty = true
+  await syncProject($, now)
+  const machine = await ensureMachine($)
+  const name = `${machine}.json`
+  const file = gitPath(p, name)
+  const before = await $.fs.read(file).catch(() => '')
+  let previous: GitEntry[] = []
+  try {
+    previous = before ? toGitEntries(JSON.parse(before)) : []
+  } catch {
+    previous = []
+  }
+  const text = gitFileText(machine, localOf(p), previous)
+  if (text !== before) await $.fs.write(file, text)
+  // Ignored by the repository (.gitignore): it stays out, as asked.
+  await $.process.run(['git', 'add', '--', `${GIT_DIR}/${name}`], { cwd: p.root, timeoutMs: 10_000 })
+}
+
+// A commit in a Bash command: `git commit`, `git -C dir commit`, `git -c k=v commit`.
+const GIT_COMMIT = /\bgit(?:\s+-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|\s+--?[\w-]+(?:=\S+)?)*\s+commit(?![\w-])/
 
 /** Moves closed days into the archive; drops or deletes those it already holds. */
 async function compact($: EngineInterface, p: Proj, now: number) {
@@ -795,12 +889,13 @@ const projectDays = (p: Proj) => {
     addInto(d, rec)
     out.set(day, d)
   }
-  for (const [day, rec] of Object.entries(p.days)) {
-    if (p.archive.days[day]?.from.includes(p.pid)) continue
+  const add = (day: string, rec: ProjDay) => {
     let d = out.get(day)
     if (!d) out.set(day, (d = emptyDay()))
     addInto(d, rec)
   }
+  for (const [day, rec] of Object.entries(p.days)) if (!p.archive.days[day]?.from.includes(p.pid)) add(day, rec)
+  for (const [day, rec] of p.imported) add(day, rec)
   return out
 }
 
@@ -842,6 +937,8 @@ async function initProject($: EngineInterface) {
     archive: { days: {} },
     others: new Map(),
     base: new Map(),
+    imported: new Map(),
+    gitFiles: new Map(),
   }
   // What the session cost before (a resume, a reload) is not this project's new work.
   costBase = (await $.session.usage().catch(() => null))?.cost?.usd
@@ -872,6 +969,7 @@ async function publishProject($: EngineInterface, now: number) {
     week: sumSince(start, days, [p.hours, ...others.map(r => r.hours)]),
     weekReset,
     total: sumDays(days),
+    since: firstDay(days),
   }
   await update($, projectView, () => view)
 }
@@ -886,6 +984,16 @@ const money = (usd: number) => `$${usd.toFixed(2)}`
 
 /** $ per hour, once there is enough time for it to mean something. */
 const perHour = (usd: number, ms: number) => (ms >= 5 * MIN ? fr(usd / (ms / HOUR), 2) : '–')
+
+/** A model's part of a span's cost: "83%", "<1%"; '' without a cost. */
+const pctOf = (part: number, whole: number) => {
+  if (!(whole > 0)) return ''
+  const pct = (part / whole) * 100
+  return part > 0 && pct < 0.5 ? '<1%' : `${Math.round(pct)}%`
+}
+
+/** "jeu. 30 oct. 2026" for a day key; '' for none. */
+const sinceLabel = (day: string) => (day ? fmtDate(dayTime(day)) : '')
 
 /** A span's models by name (ids of one model merged), most costly first. */
 const byModel = (d: ProjDay) => {
@@ -944,8 +1052,11 @@ async function coutsText($: EngineInterface) {
   const days = projectDays(p)
   const keys = [...days.keys()].sort().reverse()
   const name = p.root.split(/[\\/]/).filter(Boolean).pop() ?? p.root
+  const since = sinceLabel(firstDay(days))
   const out = [
     `Projet ${name} (${tilde(p.root)}), toutes ses sessions.`,
+    ...(since ? [`Commencé le ${since}.`] : []),
+    ...(p.imported.size > 0 ? [`Avec les autres ordinateurs : ce que leurs commits ont mis dans ${GIT_DIR}/.`] : []),
     "Coût : estimation en équivalent API (le prix de l'API), pas la facture de l'abonnement.",
     '',
   ]
@@ -960,6 +1071,7 @@ async function coutsText($: EngineInterface) {
       [
         `  ${n}`.padEnd(w.label),
         money(m.usd).padStart(w.usd),
+        pctOf(m.usd, d.usd).padStart(4),
         `${perHour(m.usd, d.work)} $/h`,
         `entrée ${fmtTok(m.input)} · écriture cache ${fmtTok(m.cacheWrite)} · lecture cache ${fmtTok(m.cacheRead)} · sortie ${fmtTok(m.output)}`,
       ].join('  '),
@@ -1253,6 +1365,8 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const id = e.tool_use_id
+    // The project's records go with each commit Claude makes.
+    if (GIT_COMMIT.test(e.command)) await safe($, () => exportGit($))
     await safe($, async () => {
       ensureTimer($)
       const now = await $.clock.now()
@@ -1423,20 +1537,17 @@ export const register: Register = on => {
     const width = Math.max(30, (e.props.bodyColumns || e.viewport?.columns || 80) - 2)
     const inner = width - 2
     const now = u.at || Date.now()
-    // One line per window: label, bar, %, pace → % at the reset and what is
-    // left, then ↻ the reset; columns line up from one window to the next.
+    // One line per window: label, bar, %, then what is left at the reset at
+    // this pace and when the reset is; columns line up from one window to the next.
     // Too narrow for that: the bar keeps the reset ("reset dans 2j 15h
-    // (dim. 21:00)", 30 columns) and the pace goes on a second line.
+    // (dim. 21:00)", 30 columns) and what is left goes on a second line.
     // A few spaces set the reset (and ctx's tokens) apart from the %.
     const GAP = '   '
     const cells = u.limits.map(l => limitCells(l, u.pace?.[l.kind], now))
-    const colW = (k: 'proj' | 'left' | 'reset') => Math.max(0, ...cells.map(c => c[k].length))
-    const wProj = colW('proj')
-    const wLeft = colW('left')
-    const wReset = colW('reset')
-    const paceW = wProj ? (wLeft ? wLeft + 2 : 0) + wProj : 0
-    // label 7 + bar + space + "100%" 4, then the pace and the reset, 2 spaces apart
-    const lineW = 12 + (paceW ? 2 + paceW : 0) + (wReset ? 2 + wReset : 0)
+    const wLeft = Math.max(0, ...cells.map(c => c.left.length))
+    const wTail = Math.max(0, ...cells.map(c => limitTail(c, wLeft).length))
+    // label 7 + bar + space + "100%" 4, then the rest, 2 spaces apart
+    const lineW = 12 + (wTail ? 2 + wTail : 0)
     const oneLine = inner - lineW >= 8
     const barW = oneLine ? Math.min(20, inner - lineW) : Math.max(8, Math.min(28, inner - 44 - GAP.length))
     // Tokens per minute over the session (cache reads left out).
@@ -1518,18 +1629,21 @@ export const register: Register = on => {
       return left < 10 ? C.accent : C.mint
     }
 
-    // After the bar, at this pace: what is left at the reset, in mint, then
-    // the % it ends at; or, in red, how far past 100 % and when it runs out.
-    const leftTag = (c: Cells, wl = 0, wp = 0) =>
-      c.proj ? (
+    // After the bar, at this pace: what is left at the reset, in mint; or, in
+    // red, how far past 100 % it goes. Then when the reset is, unless `withReset` is off.
+    const leftTag = (c: Cells, wl = 0, withReset = true) => {
+      const text = limitTail(withReset ? c : { ...c, reset: '' }, wl)
+      if (!text) return ''
+      const lead = c.left ? `${c.left.padStart(wl)}` : ' '.repeat(wl ? wl + 4 : 0)
+      return (
         <Text>
-          {c.left || wl ? <Text color={c.hit ? C.red : C.mint} bold>{`  ${c.left.padStart(wl)}`}</Text> : ''}
+          {c.left ? <Text color={c.hit ? C.red : C.mint} bold>{`  ${lead}`}</Text> : <Text>{`  ${lead}`}</Text>}
           {/* VS Code lifts any grey under its minimum contrast: sub, a step lighter */}
-          <Text color={c.hit ? C.red : C.sub}>{`  ${c.proj.padEnd(wp)}`}</Text>
+          <Text color={c.hit ? C.red : C.sub}>{c.left ? ' au reset' : 'reset'}</Text>
+          {withReset && c.reset ? <Text color={C.dim}>{` ${c.reset}`}</Text> : ''}
         </Text>
-      ) : (
-        ''
       )
+    }
 
     // The whole window on one line, its cells padded to the widest of the windows.
     const limitLine = (l: Limit, c: Cells) => {
@@ -1543,8 +1657,7 @@ export const register: Register = on => {
             {' '}
             {`${Math.round(l.percent)}%`.padStart(4)}
           </Text>
-          {paceW ? c.proj ? leftTag(c, wLeft, wProj) : <Text>{' '.repeat(2 + paceW)}</Text> : ''}
-          {c.reset ? <Text color={C.dim}>{`  ${c.reset}`}</Text> : ''}
+          {leftTag(c, wLeft)}
         </Text>
       )
     }
@@ -1624,7 +1737,8 @@ export const register: Register = on => {
             {sectionTitle('project', 'Projet', `${money(t.usd)} · ${perHour(t.usd, t.work)} $/h travail`)}
           </Box>
         )
-      type Line = { label: string; usd: string; work: string; rate: string }
+      // A model's line ends with its part of the span's cost.
+      type Line = { label: string; usd: string; work: string; rate: string; pct: string }
       const rate = (usd: number, ms: number) => {
         const r = perHour(usd, ms)
         return r === '–' ? r : `${r} $/h`
@@ -1635,9 +1749,15 @@ export const register: Register = on => {
         ['total', t],
       ]
       const blocks = spans.map(([label, d]) => ({
-        head: { label, usd: money(d.usd), work: fmtWork(d.work), rate: rate(d.usd, d.work) } as Line,
+        head: { label, usd: money(d.usd), work: fmtWork(d.work), rate: rate(d.usd, d.work), pct: '' } as Line,
         models: byModel(d).map(
-          ([name, m]): Line => ({ label: `  ${name}`, usd: money(m.usd), work: '', rate: rate(m.usd, d.work) }),
+          ([name, m]): Line => ({
+            label: `  ${name}`,
+            usd: money(m.usd),
+            work: '',
+            rate: rate(m.usd, d.work),
+            pct: pctOf(m.usd, d.usd),
+          }),
         ),
       }))
       const all = blocks.flatMap(b => [b.head, ...b.models])
@@ -1650,11 +1770,16 @@ export const register: Register = on => {
           <Text color={head ? C.accent : C.text} bold={head}>{`  ${r.usd.padStart(w('usd'))}`}</Text>
           <Text color={C.text}>{`  ${r.work.padStart(w('work'))}`}</Text>
           <Text color={C.sub}>{`  ${r.rate.padStart(w('rate'))}`}</Text>
+          {r.pct ? <Text color={C.text}>{`  ${r.pct.padStart(w('pct'))}`}</Text> : ''}
         </Text>
       )
       return (
         <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={1} marginBottom={1}>
-          {sectionTitle('project', 'Projet', "coût estimé au prix de l'API")}
+          {sectionTitle(
+            'project',
+            'Projet',
+            `${pv.since ? `commencé le ${sinceLabel(pv.since)} · ` : ''}coût estimé au prix de l'API`,
+          )}
           {blocks.flatMap((b, i) => [
             <Text key={`proj-gap-${i}`}> </Text>,
             line(b.head, `proj-${i}`, true),
@@ -1736,10 +1861,10 @@ export const register: Register = on => {
                     // the bar and its reset, then the pace on a line of its own
                     <Box key={`lim-${l.kind}`} flexDirection="column">
                       {meter(kindLabel(l.kind), l.percent, limitLevel(l), GAP + fmtReset(l.resetsAt, now))}
-                      {(cells[i] as Cells).proj ? (
+                      {(cells[i] as Cells).left ? (
                         <Text>
                           <Text>{' '.repeat(5)}</Text>
-                          {leftTag(cells[i] as Cells)}
+                          {leftTag(cells[i] as Cells, 0, false)}
                         </Text>
                       ) : null}
                     </Box>

@@ -131,6 +131,8 @@ export type ProjectView = {
   /** whether `week` starts at the 7-day window's reset */
   weekReset: boolean
   total: ProjDay
+  /** the first day counted ("2026-10-30"), every machine's; '' when none */
+  since: string
 }
 
 /** Sections of the pane that fold: their titles' keys. */

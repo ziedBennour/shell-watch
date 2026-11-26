@@ -239,6 +239,90 @@ export const roundArchive = (a: Archive): Archive => ({
   days: Object.fromEntries(Object.entries(a.days).map(([k, v]) => [k, { from: v.from, rec: roundDay(v.rec) }])),
 })
 
+// --- the project's records in its git repository --------------------------------
+//
+// Each machine writes its own file, `.shell-watch/<machine>.json`, at each
+// commit Claude makes: what this machine counted for the project, as entries
+// of a day and the processes it holds. A clone on another machine reads every
+// file and adds what its own store does not hold, so the totals follow the
+// repository. Process ids are unique on every machine: a (process, day) pair
+// counts once, wherever it is read from.
+
+/** A day and the processes it holds, summed. */
+export type GitEntry = { day: string; from: string[]; rec: ProjDay }
+
+export const GIT_DIR = '.shell-watch'
+
+export const toGitEntries = (v: unknown): GitEntry[] => {
+  const list = obj(v).entries
+  if (!Array.isArray(list)) return []
+  const out: GitEntry[] = []
+  for (const x of list) {
+    const o = obj(x)
+    const day = typeof o.day === 'string' ? o.day : ''
+    const from = Array.isArray(o.from) ? o.from.filter((p): p is string => typeof p === 'string' && p !== '') : []
+    if (DAY_KEY.test(day) && from.length > 0) out.push({ day, from, rec: toDay(o.rec) })
+  }
+  return out
+}
+
+/** This machine's entries for the project: the archive's days, then each process's days it does not hold. */
+export const localEntries = (archive: Archive, procs: Iterable<readonly [string, Record<string, ProjDay>]>) => {
+  const out: GitEntry[] = Object.entries(archive.days).map(([day, a]) => ({ day, from: [...a.from], rec: a.rec }))
+  for (const [pid, days] of procs) {
+    for (const [day, rec] of Object.entries(days)) if (!archive.days[day]?.from.includes(pid)) out.push({ day, from: [pid], rec })
+  }
+  return out
+}
+
+const pairs = (e: GitEntry) => e.from.map(pid => `${pid}|${e.day}`)
+
+/**
+ * The entries of `lists` that `local` does not count, each (process, day)
+ * once: an entry sharing a pair with one already taken is left out whole.
+ */
+export const foreignEntries = (local: readonly GitEntry[], lists: Iterable<readonly GitEntry[]>) => {
+  const seen = new Set(local.flatMap(pairs))
+  const out: GitEntry[] = []
+  for (const list of lists) {
+    for (const e of list) {
+      const ps = pairs(e)
+      if (ps.some(p => seen.has(p))) continue
+      for (const p of ps) seen.add(p)
+      out.push(e)
+    }
+  }
+  return out
+}
+
+/** Entries as days, summed. */
+export const entryDays = (entries: Iterable<GitEntry>) => {
+  const out = new Map<string, ProjDay>()
+  for (const e of entries) {
+    let d = out.get(e.day)
+    if (!d) out.set(e.day, (d = emptyDay()))
+    addInto(d, e.rec)
+  }
+  return out
+}
+
+/**
+ * This machine's file: its entries now, and those its last file held that
+ * its store no longer does (a store lost, a clone moved), so nothing written
+ * once is lost. One entry per line, by day, for readable diffs.
+ */
+export const gitFileText = (machine: string, local: readonly GitEntry[], previous: readonly GitEntry[]) => {
+  const all = [...local, ...foreignEntries(local, [previous])]
+    .map(e => ({ day: e.day, from: [...e.from].sort(), rec: roundDay(e.rec) }))
+    .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : (a.from[0] ?? '') < (b.from[0] ?? '') ? -1 : 1))
+  const lines = all.map(e => `    ${JSON.stringify(e)}`)
+  return `{\n  "v": 1,\n  "machine": ${JSON.stringify(machine)},\n  "entries": [\n${lines.join(',\n')}${lines.length ? '\n' : ''}  ]\n}\n`
+}
+
+/** The first day with something counted: "2026-10-30", '' for none. */
+export const firstDay = (days: ReadonlyMap<string, ProjDay>) =>
+  [...days].filter(([, d]) => d.usd > 0 || d.open > 0).map(([k]) => k).sort()[0] ?? ''
+
 /**
  * A response's weight for sharing out a rise of the session's cost between
  * requests that ended together: its tokens at the ratios every Claude model

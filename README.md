@@ -57,9 +57,9 @@ niveau d'effort, chacun de sa couleur. Dessous, depuis quand la session est ouve
 ### Abonnement
 
 ```
-5h     ━━━━━━━━━━  20%  +57%  → 43% au reset    ↻ 3h50 (09:30)
-7j     ━━━━━━━━━━  13%  +68%  → 32% au reset    ↻ 2j 15h (dim. 21:00)
-Fable  ━━━━━━━━━━  90%  -26%  vide dans 13h20   ↻ 2j 15h (dim. 20:59)
+5h     ━━━━━━━━━━  20%  +57% au reset dans 3h50 (09:30)
+7j     ━━━━━━━━━━  13%  +68% au reset dans 2j 15h (dim. 21:00)
+Fable  ━━━━━━━━━━  90%  -26% au reset dans 2j 15h (dim. 20:59)
 
 ctx    ━━━━━━━━━━  41%    82k / 200k
 coût   $3.10 · 2,58 $/h · 2,4k tok/min
@@ -76,11 +76,9 @@ barre avec son reset, puis ce qu'il restera en dessous.
   la limite tombe avant), rouge à partir de 80 %.
 - Après le pourcentage, à ton rythme (la moyenne depuis le début de la fenêtre, connue après
   10 minutes pour 5h, 2 heures pour une semaine) :
-  - `+57%  → 43% au reset` : en vert, ce qu'il te restera au reset, puis le pourcentage
-    que tu auras atteint.
-  - `-26%  vide dans 13h20` : en rouge, la limite tombe avant le reset, dans 13h20, et
-    serait dépassée de 26 % au reset.
-  - `↻ 3h50 (09:30)` : le reset de la fenêtre, dans combien de temps et à quelle heure.
+  - `+57% au reset` : en vert, ce qu'il te restera au reset.
+  - `-26% au reset` : en rouge, la limite tombe avant le reset et serait dépassée de 26 %.
+  - `dans 3h50 (09:30)` : le reset de la fenêtre, dans combien de temps et à quelle heure.
 - **ctx** : le remplissage de la fenêtre de contexte de la session.
 - **coût** : le coût de la session en équivalent API, ce coût par heure, et les tokens
   consommés par minute (sous-agents compris, lectures du cache non comptées).
@@ -88,19 +86,19 @@ barre avec son reset, puis ce qu'il restera en dessous.
 ### Projet
 
 ```
-▾ Projet  coût estimé au prix de l'API
+▾ Projet  commencé le jeu. 30 oct. 2026 · coût estimé au prix de l'API
 
 séance          $1.20   0h40  1,80 $/h
-  Opus 5.5      $1.00         1,50 $/h
-  Sonnet 5.5    $0.20         0,30 $/h
+  Opus 5.5      $1.00         1,50 $/h  83%
+  Sonnet 5.5    $0.20         0,30 $/h  17%
 
 depuis ↻ 7j    $12.40   6h10  2,01 $/h
-  Opus 5.5     $10.00         1,62 $/h
-  Sonnet 5.5    $2.40         0,39 $/h
+  Opus 5.5     $10.00         1,62 $/h  81%
+  Sonnet 5.5    $2.40         0,39 $/h  19%
 
 total          $40.10  21h00  1,91 $/h
-  Opus 5.5     $35.00         1,67 $/h
-  Sonnet 5.5    $5.10         0,24 $/h
+  Opus 5.5     $35.00         1,67 $/h  87%
+  Sonnet 5.5    $5.10         0,24 $/h  13%
 ```
 
 Ce que coûte le projet (le dossier de la session), toutes ses sessions additionnées, celles
@@ -110,7 +108,8 @@ qui tournent en parallèle comprises, sur trois périodes :
   repart à zéro après `/clear`.
 - **depuis ↻ 7j** : depuis le dernier reset de la limite 7j (à l'heure près). Sans limite
   connue (clé API) : **7 derniers j**.
-- **total** : depuis l'installation de la version 0.10.0 (rien de rétroactif).
+- **total** : depuis l'installation de la version 0.10.0 (rien de rétroactif) ; le titre
+  donne le premier jour compté (**commencé le**), tous ordinateurs confondus.
 
 Sur chaque ligne :
 
@@ -126,6 +125,7 @@ Sur chaque ligne :
   le compteur s'arrête et ce trou compte 3 min ; il repart au signe suivant.
 - **$/h** : le coût divisé par le temps de travail (`–` sous 5 min). Par modèle, sa part :
   les parts s'additionnent au $/h de la période.
+- **%** (par modèle) : sa part du coût de la période.
 
 `/couts` donne le détail jour par jour, chaque modèle avec ses quatre types de tokens
 (entrée, écriture du cache, lecture du cache, sortie).
@@ -174,6 +174,13 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
   fichier, écrit chaque minute et à la fermeture, avec ses 8 derniers jours heure par heure
   (pour couper au reset de 7j) ; les jours d'avant-hier et plus anciens sont regroupés en un
   enregistrement par projet. Les sections pliées y sont aussi gardées.
+- **Projet dans le dépôt git** : à chaque `git commit` lancé par Claude, le mod écrit
+  `.shell-watch/<ordinateur>.json` (ce que cet ordinateur a compté pour le projet, jour par
+  jour) et l'ajoute au commit. Un clone sur un autre ordinateur lit tous ces fichiers et
+  ajoute ce que son propre store n'a pas : les totaux suivent le dépôt, sans double compte
+  (chaque session a un identifiant unique). Un fichier par ordinateur : pas de conflit de
+  fusion. Un commit fait à la main ne met rien à jour : le prochain commit de Claude le fait.
+  Pour ne pas versionner ces stats : `.shell-watch/` dans `.gitignore`.
 - **Shells, agents, tokens** : propres à la session, ils repartent de zéro à chaque démarrage.
 - **`/usage`** : lu par `claude -p --safe-mode --no-session-persistence /usage`, sans
   plugins, sans session enregistrée et sans requête au modèle.
