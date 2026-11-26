@@ -26,6 +26,14 @@ claude plugin install shell-watch@shell-watch
 
 ### Mettre à jour
 
+Au premier lancement, le mod demande s'il peut se mettre à jour tout seul. Avec un oui, il
+active l'auto-update de son marketplace, comme le fait `/plugin` → Marketplaces →
+shell-watch → Turn on auto-update. Ensuite, à chaque démarrage, Claude Code installe la
+nouvelle version et propose `/reload-plugins`. `/maj-auto` active l'auto-update plus tard,
+`/maj-auto off` le coupe.
+
+À la main :
+
 ```bash
 claude plugin marketplace update shell-watch
 claude plugin update shell-watch@shell-watch

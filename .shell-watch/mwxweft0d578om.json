@@ -2,6 +2,6 @@
   "v": 1,
   "machine": "mwxweft0d578om",
   "entries": [
-    {"day":"2026-11-26","from":["mwxw0bh3uj9tfy"],"rec":{"open":657011,"work":657011,"usd":2.668123,"models":{"claude-opus-5-5":{"usd":2.668123,"input":118,"cacheWrite":99628,"cacheRead":5303773,"output":36773}}}}
+    {"day":"2026-11-26","from":["mwxw0bh3uj9tfy"],"rec":{"open":1255119,"work":1255119,"usd":4.095424,"models":{"claude-opus-5-5":{"usd":4.095424,"input":174,"cacheWrite":127306,"cacheRead":9163692,"output":54750}}}}
   ]
 }

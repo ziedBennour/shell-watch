@@ -1434,6 +1434,73 @@ async function playDone($: EngineInterface) {
   await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => undefined)
 }
 
+// --- automatic updates ----------------------------------------------------------
+//
+// Claude Code updates a marketplace's plugins when it starts only if that
+// marketplace's auto-update is on, and it is off by default for one that is
+// not Anthropic's. Installed from a marketplace, the mod asks once to turn it
+// on, the way /plugin does: `"autoUpdate": true` on its entry in
+// known_marketplaces.json. Then each start installs a new version and tells
+// the person to run /reload-plugins.
+
+const AUTOUPDATE_KEY = 'autoupdate-1'
+// Asked once per load: a /clear or a resume starts the session again.
+let autoUpdateOffered = false
+
+/** The marketplace the mod was installed from and the file listing it; null for a mod loaded from its own folder. */
+const marketplaceOf = (root: string) => {
+  const m = /^(.*[\\/]plugins)[\\/]cache[\\/]([^\\/]+)[\\/][^\\/]+[\\/][^\\/]+[\\/]*$/.exec(root)
+  return m ? { name: m[2] as string, file: join(m[1] as string, 'known_marketplaces.json') } : null
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+async function readMarketplaces($: EngineInterface, file: string) {
+  const cfg: unknown = JSON.parse(await $.fs.read(file))
+  return isObj(cfg) ? cfg : null
+}
+
+/** /maj-auto: turns the marketplace's auto-update on (or off); the answer stands, nothing is asked again. */
+async function setAutoUpdate($: EngineInterface, on: boolean) {
+  const mk = marketplaceOf($.plugin.root)
+  if (!mk) return "shell-watch n'est pas installé depuis un marketplace : pas de mise à jour automatique."
+  const cfg = await readMarketplaces($, mk.file)
+  const entry = cfg?.[mk.name]
+  if (!cfg || !isObj(entry)) return `Le marketplace ${mk.name} n'est pas dans ${mk.file}.`
+  await $.store.set(AUTOUPDATE_KEY, on ? 'yes' : 'no')
+  if ((entry.autoUpdate === true) !== on) {
+    cfg[mk.name] = { ...entry, autoUpdate: on }
+    await $.fs.write(mk.file, JSON.stringify(cfg, null, 2))
+  }
+  return on
+    ? 'Mises à jour automatiques de shell-watch : activées. À chaque démarrage, Claude Code installe la nouvelle version et te dit de faire /reload-plugins.'
+    : 'Mises à jour automatiques de shell-watch : coupées. /maj-auto les remet.'
+}
+
+/** Once per machine: asks to turn auto-update on, unless it was answered or set in /plugin. */
+async function offerAutoUpdate($: EngineInterface) {
+  const mk = marketplaceOf($.plugin.root)
+  if (!mk || (await $.store.get(AUTOUPDATE_KEY)) !== undefined) return
+  const entry = (await readMarketplaces($, mk.file).catch(() => null))?.[mk.name]
+  if (!isObj(entry) || entry.autoUpdate !== undefined) return
+  // After the start has drawn, not in its way.
+  await $.clock.sleep(2000)
+  const YES = 'Activer'
+  const NO = 'Non merci'
+  const answer = await $.ui
+    .ask(
+      "Mettre à jour shell-watch automatiquement ? Au démarrage de Claude Code, la nouvelle version s'installe et un avis te propose /reload-plugins. Tu pourras changer d'avis avec /maj-auto.",
+      { header: 'shell-watch', options: [YES, NO] },
+    )
+    // Dismissed: asked again at the next start.
+    .catch(() => '')
+  if (answer === YES) $.ui.log(await setAutoUpdate($, true))
+  else if (answer === NO) {
+    await $.store.set(AUTOUPDATE_KEY, 'no')
+    $.ui.log('shell-watch ne se mettra pas à jour tout seul. /maj-auto active les mises à jour automatiques.')
+  }
+}
+
 // --- the module -----------------------------------------------------------------
 
 export const register: Register = on => {
@@ -1455,6 +1522,11 @@ export const register: Register = on => {
       description: "Move what a session started in another folder counted into this project (none: list those folders)",
       argumentHint: '[dossier]',
     })
+    await $.command.register({
+      name: 'maj-auto',
+      description: "Turn on shell-watch's automatic update when Claude Code starts ('off': turn it off)",
+      argumentHint: '[off]',
+    })
     ensureTimer($)
     // Folded sections stay folded from one session to the next.
     await safe($, async () => {
@@ -1471,6 +1543,11 @@ export const register: Register = on => {
     // No status-line entry any more: clear the one an earlier version left.
     $.ui.status(undefined)
     void $.ui.open({ id: PANE, title: TITLE, backgroundColor: C.base })
+    // Not awaited: the start does not wait on the person's answer.
+    if (!autoUpdateOffered) {
+      autoUpdateOffered = true
+      void safe($, () => offerAutoUpdate($))
+    }
     return next(e)
   })
 
@@ -1499,6 +1576,13 @@ export const register: Register = on => {
   on('command.run', { command: 'projet-rattacher' }, async ($, e) => {
     signal()
     const text = await attachText($, e.args).catch((err: unknown) => `shell-watch : ${String(err)}`)
+    return { text, isTextDisplayOnly: true }
+  })
+
+  on('command.run', { command: 'maj-auto' }, async ($, e) => {
+    signal()
+    const off = /^(off|non|no|0)$/i.test(e.args.trim())
+    const text = await setAutoUpdate($, !off).catch((err: unknown) => `shell-watch : ${String(err)}`)
     return { text, isTextDisplayOnly: true }
   })
 
