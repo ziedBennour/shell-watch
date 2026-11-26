@@ -102,6 +102,8 @@ const projectView = atom(
 )
 const folded = atom({ plugin: 'shell-watch', key: 'folded' } as const, [] as Section[], { shape: 'folded-1' })
 const proc = atom({ plugin: 'shell-watch', key: 'proc' } as const, '', { shape: 'proc-1' })
+/** The sound when Claude is done, as the pane's button shows it; $.store holds the choice. */
+const sound = atom({ plugin: 'shell-watch', key: 'sound' } as const, true, { shape: 'sound-1' })
 
 const FOLD_KEY = 'folded-1'
 const SECTIONS: readonly unknown[] = ['usage', 'project', 'agents', 'shells'] satisfies Section[]
@@ -1503,19 +1505,23 @@ async function chooseSound($: EngineInterface, arg: string) {
   if (r.exitCode === 3) return `shell-watch : aucun fichier « ${src} ».`
   if (r.exitCode !== 0) return `shell-watch : copie impossible de « ${src} » : ${r.stderr.trim() || `code ${r.exitCode}`}.`
   soundFile = { path: dst, name }
-  soundOn = true
   await $.store.set(SOUND_FILE_KEY, soundFile)
-  await $.store.set(SOUND_KEY, true)
-  void playDone($).catch(() => undefined)
+  await setSound($, true)
   return `Son de fin de travail : ${name}. /son défaut remet celui du système.`
+}
+
+/** Turns the sound on or off (/son, the pane's button); on, it plays once to be heard. */
+async function setSound($: EngineInterface, on: boolean) {
+  soundOn = on
+  await $.store.set(SOUND_KEY, on)
+  await update($, sound, () => on)
+  if (on) void playDone($).catch(() => undefined)
 }
 
 async function soundText($: EngineInterface, args: string) {
   const a = args.trim()
   const set = async (on: boolean) => {
-    soundOn = on
-    await $.store.set(SOUND_KEY, on)
-    if (on) void playDone($).catch(() => undefined)
+    await setSound($, on)
     return on ? `Son de fin de travail : activé (${await soundLabel($)}).` : 'Son de fin de travail : coupé.'
   }
   if (!a) return set(!(await isSoundOn($)))
@@ -1630,6 +1636,10 @@ export const register: Register = on => {
       if (Array.isArray(v)) await update($, folded, () => v.filter((x): x is Section => SECTIONS.includes(x)))
     })
     await safe($, () => initProject($))
+    await safe($, async () => {
+      const isOn = await isSoundOn($)
+      await update($, sound, () => isOn)
+    })
     // A new session id (startup, /clear, resume) counts its tokens from zero.
     await safe($, async () => {
       const sid = await $.session.id()
@@ -1868,6 +1878,7 @@ export const register: Register = on => {
     const runs = await read($, agents)
     const pv = await read($, projectView)
     const shut = await read($, folded)
+    const soundIsOn = await read($, sound)
     const width = Math.max(30, (e.props.bodyColumns || e.viewport?.columns || 80) - 2)
     const inner = width - 2
     const now = u.at || Date.now()
@@ -2166,15 +2177,29 @@ export const register: Register = on => {
               </Text>
             </Box>
           </Box>
-          {u.startedAt ? (
-            <Text color={C.dim}>
-              {'session depuis '}
-              <Text color={C.sub} bold>
-                {fmtSince(now - u.startedAt)}
-              </Text>
-              {` (ouverte à ${clockHM(u.startedAt)})`}
-            </Text>
-          ) : null}
+          {/* the session's age on the left; on the right the button that turns the sound on or off */}
+          <Box flexDirection="row" justifyContent="space-between">
+            <Box flexShrink={1}>
+              {u.startedAt ? (
+                <Text color={C.dim} wrap="truncate-end">
+                  {'session depuis '}
+                  <Text color={C.sub} bold>
+                    {fmtSince(now - u.startedAt)}
+                  </Text>
+                  {` (ouverte à ${clockHM(u.startedAt)})`}
+                </Text>
+              ) : (
+                <Text> </Text>
+              )}
+            </Box>
+            <Box flexShrink={0} marginLeft={2}>
+              <Button key="sound" plain onPress={press(() => setSound($, !soundIsOn))}>
+                <Text color={soundIsOn ? C.mint : C.dim} bold={soundIsOn}>
+                  {soundIsOn ? '♪ son activé' : '♪ son coupé'}
+                </Text>
+              </Button>
+            </Box>
+          </Box>
         </Box>
         <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={isShut('usage') ? 0 : 1} marginBottom={1}>
           {sectionTitle(

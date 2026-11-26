@@ -151,6 +151,8 @@ declare module 'claude-code' {
       folded: Shaped<Section[]>
       /** this process's id: its record's key in $.store */
       proc: Shaped<string>
+      /** whether the sound plays when Claude is done */
+      sound: Shaped<boolean>
     }
   }
 }
