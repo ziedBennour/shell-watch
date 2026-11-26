@@ -188,7 +188,7 @@ son de notification du système : celui de Windows (`Windows Notify System Gener
 - `/son <fichier>` : wav, mp3, ogg, flac, m4a… Le mod le copie dans son dossier de données
   (gardé aux mises à jour) : l'original peut être déplacé ou effacé. Joué 30 s au plus.
 - `/son défaut` : revient au son du système.
-- `/son`, `/son on`, `/son off`, ou le bouton `♪ son` en haut du panneau : le coupe ou le
+- `/son`, `/son on`, `/son off`, ou le bouton `♪ son` au bout de la ligne « coût » : le coupe ou le
   remet.
 
 Le choix est gardé d'une session à l'autre. Sous Linux, un mp3 passe par `ffplay`.

@@ -2177,29 +2177,15 @@ export const register: Register = on => {
               </Text>
             </Box>
           </Box>
-          {/* the session's age on the left; on the right the button that turns the sound on or off */}
-          <Box flexDirection="row" justifyContent="space-between">
-            <Box flexShrink={1}>
-              {u.startedAt ? (
-                <Text color={C.dim} wrap="truncate-end">
-                  {'session depuis '}
-                  <Text color={C.sub} bold>
-                    {fmtSince(now - u.startedAt)}
-                  </Text>
-                  {` (ouverte à ${clockHM(u.startedAt)})`}
-                </Text>
-              ) : (
-                <Text> </Text>
-              )}
-            </Box>
-            <Box flexShrink={0} marginLeft={2}>
-              <Button key="sound" plain onPress={press(() => setSound($, !soundIsOn))}>
-                <Text color={soundIsOn ? C.mint : C.dim} bold={soundIsOn}>
-                  {soundIsOn ? '♪ son activé' : '♪ son coupé'}
-                </Text>
-              </Button>
-            </Box>
-          </Box>
+          {u.startedAt ? (
+            <Text color={C.dim}>
+              {'session depuis '}
+              <Text color={C.sub} bold>
+                {fmtSince(now - u.startedAt)}
+              </Text>
+              {` (ouverte à ${clockHM(u.startedAt)})`}
+            </Text>
+          ) : null}
         </Box>
         <Box flexDirection="column" backgroundColor={C.card} paddingX={1} paddingY={isShut('usage') ? 0 : 1} marginBottom={1}>
           {sectionTitle(
@@ -2245,9 +2231,12 @@ export const register: Register = on => {
                   </Box>,
                 ]
               : []),
-            ...(u.usd !== undefined
-              ? [
-                  <Text key="cost">
+            // the session's cost on the left; at the far right the button that
+            // turns the sound on or off, there even before the cost is known
+            <Box key="cost" flexDirection="row" justifyContent="space-between">
+              <Box flexShrink={1}>
+                {u.usd !== undefined ? (
+                  <Text wrap="truncate-end">
                     <Text color={C.sub}>{'coût'.padEnd(7)}</Text>
                     <Text color={C.accent} bold>
                       ${u.usd.toFixed(2)}
@@ -2258,9 +2247,19 @@ export const register: Register = on => {
                       ''
                     )}
                     {tokAvg !== undefined ? <Text color={C.dim}>{` · ${fmtTok(tokAvg)} tok/min`}</Text> : ''}
-                  </Text>,
-                ]
-              : []),
+                  </Text>
+                ) : (
+                  <Text> </Text>
+                )}
+              </Box>
+              <Box flexShrink={0} marginLeft={2}>
+                <Button key="sound" plain onPress={press(() => setSound($, !soundIsOn))}>
+                  <Text color={soundIsOn ? C.mint : C.dim} bold={soundIsOn}>
+                    {soundIsOn ? '♪ son activé' : '♪ son coupé'}
+                  </Text>
+                </Button>
+              </Box>
+            </Box>,
           ].flatMap((el, i) => [<Text key={`gap-${i}`}> </Text>, el])}
         </Box>
 
