@@ -183,8 +183,14 @@ code de sortie et ses dernières lignes de sortie, en direct tant qu'elle tourne
 
 Quand Claude a fini (la fin d'un tour, sauf si tu l'as interrompu ; pas les sous-agents), le
 son de notification du système : celui de Windows (`Windows Notify System Generic.wav`),
-`Glass` sur macOS, `complete.oga` (freedesktop) sur Linux. `/son` le coupe ou le remet ;
-le choix est gardé d'une session à l'autre.
+`Glass` sur macOS, `complete.oga` (freedesktop) sur Linux. Ou un son à toi :
+
+- `/son <fichier>` : wav, mp3, ogg, flac, m4a… Le mod le copie dans son dossier de données
+  (gardé aux mises à jour) : l'original peut être déplacé ou effacé. Joué 30 s au plus.
+- `/son défaut` : revient au son du système.
+- `/son`, `/son on`, `/son off` : le coupe ou le remet.
+
+Le choix est gardé d'une session à l'autre. Sous Linux, un mp3 passe par `ffplay`.
 
 ## Où sont les données
 

@@ -1408,30 +1408,125 @@ async function refreshAgents($: EngineInterface) {
 // --- a sound when Claude is done ---------------------------------------------------
 //
 // The end of a main-loop turn that was not interrupted plays the system's own
-// notification sound. $.audio.play plays nothing in a Windows or Linux
-// terminal: the system's player does it, by `$.process.run`. /son switches it.
+// notification sound, or a file the person chose (/son <fichier>), copied into
+// the mod's data folder so it outlives the original. $.audio.play plays nothing
+// in a Windows or Linux terminal: the system's player does it, by
+// `$.process.run`, the paths passed in the environment, never in a script.
 
 const SOUND_KEY = 'sound-1'
+/** The chosen sound: `{ path, name }`, its copy and the file's own name; absent, the system's. */
+const SOUND_FILE_KEY = 'sound-file-1'
+const SOUND_EXTS = ['wav', 'mp3', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'aiff', 'aif', 'wma']
+const PLAY_MS = 30_000
 let soundOn: boolean | null = null
+let soundFile: { path: string; name: string } | null | undefined
 let sysname = ''
 
-const WIN_SOUND = "(New-Object Media.SoundPlayer (Join-Path $env:WINDIR 'Media/Windows Notify System Generic.wav')).PlaySync()"
+// A .wav by the SoundPlayer; any other format by the media player, waited on for its length.
+const WIN_PLAY = [
+  "$f = if ($env:SW_SOUND) { $env:SW_SOUND } else { Join-Path $env:WINDIR 'Media/Windows Notify System Generic.wav' }",
+  "if ($f -match '\\.wav$') { (New-Object Media.SoundPlayer $f).PlaySync(); exit }",
+  'Add-Type -AssemblyName PresentationCore',
+  '$p = New-Object System.Windows.Media.MediaPlayer',
+  '$p.Open([uri]$f)',
+  'for ($i = 0; $i -lt 50 -and -not $p.NaturalDuration.HasTimeSpan; $i++) { Start-Sleep -Milliseconds 100 }',
+  '$p.Play()',
+  `$ms = if ($p.NaturalDuration.HasTimeSpan) { $p.NaturalDuration.TimeSpan.TotalMilliseconds } else { ${PLAY_MS} }`,
+  'Start-Sleep -Milliseconds ([int]$ms + 200)',
+].join('; ')
+
+// Exit 3: no such file.
+const WIN_COPY = [
+  '$s = $env:SW_SRC',
+  "if ($s.StartsWith('~')) { $s = $HOME + $s.Substring(1) }",
+  'if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { exit 3 }',
+  'Copy-Item -LiteralPath $s -Destination $env:SW_DST -Force',
+].join('; ')
+const SH_COPY = 'case "$1" in "~"*) set -- "$HOME${1#"~"}" "$2";; esac; [ -f "$1" ] || exit 3; cp "$1" "$2"'
+
+async function system($: EngineInterface) {
+  if (!sysname) sysname = (await $.session.machine().catch(() => null))?.sysname ?? '?'
+  return sysname
+}
 
 async function isSoundOn($: EngineInterface) {
   if (soundOn === null) soundOn = (await $.store.get(SOUND_KEY)) !== false
   return soundOn
 }
 
+async function chosenSound($: EngineInterface) {
+  if (soundFile === undefined) {
+    const v = await $.store.get(SOUND_FILE_KEY)
+    soundFile = isObj(v) && typeof v.path === 'string' && typeof v.name === 'string' ? { path: v.path, name: v.name } : null
+  }
+  return soundFile
+}
+
 async function playDone($: EngineInterface) {
   if (!(await isSoundOn($))) return
-  if (!sysname) sysname = (await $.session.machine().catch(() => null))?.sysname ?? '?'
-  const argv =
-    sysname === 'Windows_NT'
-      ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', WIN_SOUND]
-      : sysname === 'Darwin'
-        ? ['afplay', '/System/Library/Sounds/Glass.aiff']
-        : ['paplay', '/usr/share/sounds/freedesktop/stereo/complete.oga']
-  await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => undefined)
+  const chosen = await chosenSound($)
+  // A copy gone (the data folder emptied): the system's sound.
+  const file = chosen && (await $.fs.exists(chosen.path).catch(() => false)) ? chosen.path : undefined
+  const sys = await system($)
+  if (sys === 'Windows_NT') {
+    const argv = ['powershell', '-NoProfile', '-NonInteractive', '-Command', WIN_PLAY]
+    await $.process.run(argv, { env: file ? { SW_SOUND: file } : {}, timeoutMs: PLAY_MS }).catch(() => undefined)
+    return
+  }
+  if (sys === 'Darwin') {
+    await $.process.run(['afplay', file ?? '/System/Library/Sounds/Glass.aiff'], { timeoutMs: PLAY_MS }).catch(() => undefined)
+    return
+  }
+  const f = file ?? '/usr/share/sounds/freedesktop/stereo/complete.oga'
+  // paplay reads wav, ogg and flac, not mp3: ffplay then.
+  const r = await $.process.run(['paplay', f], { timeoutMs: PLAY_MS }).catch(() => null)
+  if (r?.exitCode !== 0)
+    await $.process.run(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', f], { timeoutMs: PLAY_MS }).catch(() => undefined)
+}
+
+const soundLabel = async ($: EngineInterface) => (await chosenSound($))?.name ?? 'celui du système'
+
+/** /son <fichier>: copies it into the data folder and plays it from now on. */
+async function chooseSound($: EngineInterface, arg: string) {
+  const src = arg.replace(/^(["'])(.*)\1$/, '$2')
+  const name = src.split(/[\\/]/).pop() ?? src
+  const ext = /\.([A-Za-z0-9]+)$/.exec(name)?.[1]?.toLowerCase()
+  if (!ext || !SOUND_EXTS.includes(ext)) return `shell-watch : « ${name} » n'est pas un son (${SOUND_EXTS.join(', ')}).`
+  const data = (await $.process.hookEnv()).CLAUDE_PLUGIN_DATA
+  if (!data) return "shell-watch : pas de dossier de données pour garder le son."
+  const dst = join(data, `son.${ext}`)
+  const sys = await system($)
+  const r =
+    sys === 'Windows_NT'
+      ? await $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', WIN_COPY], { env: { SW_SRC: src, SW_DST: dst } })
+      : await $.process.run(['sh', '-c', SH_COPY, 'sh', src, dst])
+  if (r.exitCode === 3) return `shell-watch : aucun fichier « ${src} ».`
+  if (r.exitCode !== 0) return `shell-watch : copie impossible de « ${src} » : ${r.stderr.trim() || `code ${r.exitCode}`}.`
+  soundFile = { path: dst, name }
+  soundOn = true
+  await $.store.set(SOUND_FILE_KEY, soundFile)
+  await $.store.set(SOUND_KEY, true)
+  void playDone($).catch(() => undefined)
+  return `Son de fin de travail : ${name}. /son défaut remet celui du système.`
+}
+
+async function soundText($: EngineInterface, args: string) {
+  const a = args.trim()
+  const set = async (on: boolean) => {
+    soundOn = on
+    await $.store.set(SOUND_KEY, on)
+    if (on) void playDone($).catch(() => undefined)
+    return on ? `Son de fin de travail : activé (${await soundLabel($)}).` : 'Son de fin de travail : coupé.'
+  }
+  if (!a) return set(!(await isSoundOn($)))
+  if (/^(on|oui|1)$/i.test(a)) return set(true)
+  if (/^(off|non|0)$/i.test(a)) return set(false)
+  if (/^(d[ée]faut|syst[èe]me|default)$/i.test(a)) {
+    soundFile = null
+    await $.store.delete(SOUND_FILE_KEY)
+    return set(true)
+  }
+  return chooseSound($, a)
 }
 
 // --- automatic updates ----------------------------------------------------------
@@ -1511,7 +1606,8 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'son',
-      description: 'Switch the sound played when Claude is done (on / off)',
+      description: "The sound played when Claude is done: on / off, a sound file of yours, or 'défaut' for the system's",
+      argumentHint: '[on|off|défaut|fichier]',
     })
     await $.command.register({
       name: 'couts',
@@ -1586,13 +1682,10 @@ export const register: Register = on => {
     return { text, isTextDisplayOnly: true }
   })
 
-  on('command.run', { command: 'son' }, async $ => {
+  on('command.run', { command: 'son' }, async ($, e) => {
     signal()
-    const next = !(await isSoundOn($))
-    soundOn = next
-    await $.store.set(SOUND_KEY, next)
-    if (next) void playDone($)
-    return { text: next ? 'Son de fin de travail : activé.' : 'Son de fin de travail : coupé.', isTextDisplayOnly: true }
+    const text = await soundText($, e.args).catch((err: unknown) => `shell-watch : ${String(err)}`)
+    return { text, isTextDisplayOnly: true }
   })
 
   on('command.run', { command: 'shells' }, async $ => {
