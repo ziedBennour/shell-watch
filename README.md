@@ -97,17 +97,18 @@ barre avec son reset, puis ce qu'il restera en dessous.
 ```
 ▾ Projet  commencé le jeu. 30 oct. 2026 · coût estimé au prix de l'API
 
+                                          coût  token  temps
 séance          $1.20   0h40  1,80 $/h
-  Opus 5.5      $1.00         1,50 $/h  83%
-  Sonnet 5.5    $0.20         0,30 $/h  17%
+  Opus 5.5      $1.00         1,50 $/h     83%    71%   0h25
+  Sonnet 5.5    $0.20         0,30 $/h     17%    29%   0h12
 
 depuis ↻ 7j    $12.40   6h10  2,01 $/h
-  Opus 5.5     $10.00         1,62 $/h  81%
-  Sonnet 5.5    $2.40         0,39 $/h  19%
+  Opus 5.5     $10.00         1,62 $/h     81%    75%   3h40
+  Sonnet 5.5    $2.40         0,39 $/h     19%    25%   1h05
 
 total          $40.10  21h00  1,91 $/h
-  Opus 5.5     $35.00         1,67 $/h  87%
-  Sonnet 5.5    $5.10         0,24 $/h  13%
+  Opus 5.5     $35.00         1,67 $/h     87%    80%   3h40
+  Sonnet 5.5    $5.10         0,24 $/h     13%    20%   1h05
 ```
 
 Ce que coûte le projet (le dossier de la session), toutes ses sessions additionnées, celles
@@ -134,7 +135,14 @@ Sur chaque ligne :
   le compteur s'arrête et ce trou compte 3 min ; il repart au signe suivant.
 - **$/h** : le coût divisé par le temps de travail (`–` sous 5 min). Par modèle, sa part :
   les parts s'additionnent au $/h de la période.
-- **%** (par modèle) : sa part du coût de la période.
+Puis, pour chaque modèle, trois colonnes titrées une fois en haut :
+
+- **coût** : sa part du coût de la période.
+- **token** : sa part des tokens de la période, lectures du cache exclues (comme le `tok/min`).
+- **temps** : le temps où ce modèle travaillait : ses tours et ceux de ses sous-agents, hors
+  attente d'une réponse de ta part. Deux modèles à l'œuvre en même temps comptent chacun ce
+  temps : les temps des modèles peuvent dépasser le travail de la période. Compté depuis la
+  0.20.0 (`–` avant) ; `/couts` le donne aussi, jour par jour.
 
 `/couts` donne le détail jour par jour, chaque modèle avec ses quatre types de tokens
 (entrée, écriture du cache, lecture du cache, sortie).

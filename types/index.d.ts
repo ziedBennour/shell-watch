@@ -108,6 +108,8 @@ export type ModelDay = {
   cacheWrite: number
   cacheRead: number
   output: number
+  /** ms this model was at work (its turns, its subagents'), counted since 0.20.0 */
+  time: number
 }
 
 /** Work on a project over a span: times in ms, cost in $ at API prices, per model id. */

@@ -98,7 +98,8 @@ const agents = atom({ plugin: 'shell-watch', key: 'agents' } as const, [] as Age
 const projectView = atom(
   { plugin: 'shell-watch', key: 'project' } as const,
   { root: '', session: emptyDay(), week: emptyDay(), weekReset: false, total: emptyDay(), since: '' } as ProjectView,
-  { shape: 'project-3' },
+  // project-4: each model's time; a view drawn before it has none and is not read.
+  { shape: 'project-4' },
 )
 const folded = atom({ plugin: 'shell-watch', key: 'folded' } as const, [] as Section[], { shape: 'folded-1' })
 const proc = atom({ plugin: 'shell-watch', key: 'proc' } as const, '', { shape: 'proc-1' })
@@ -663,12 +664,19 @@ const gap = new Map<string, number>()
 // on a person, with their loop.
 const loops = new Set<string>()
 const asks = new Map<string, string>()
+// Each loop's model, as its last request named it: whose time a loop at work counts.
+const loopModel = new Map<string, string>()
 
-const isWorking = () => {
+/** The loops at work: in a turn, not waiting on a person. */
+const workingLoops = () => {
   const waiting = new Set(asks.values())
-  for (const l of loops) if (!waiting.has(l)) return true
-  return false
+  return [...loops].filter(l => !waiting.has(l))
 }
+
+const isWorking = () => workingLoops().length > 0
+
+/** The models at work now, each once however many of its loops run. */
+const workingModels = () => new Set(workingLoops().map(l => loopModel.get(l) || lastModel).filter(Boolean))
 
 /** A sign that the person is there. */
 const signal = () => {
@@ -736,6 +744,8 @@ function accountTime(now: number) {
   if (dt <= 0 || dt > ASLEEP_MS) return
   const recs = recsAt(p, now)
   for (const rec of recs) rec.open += dt
+  // Each model at work counts the tick: two at once both count it.
+  for (const m of workingModels()) for (const rec of recs) (rec.models[m] ??= emptyModel()).time += dt
   p.dirty = true
   if (away) return
   if (now - activeAt >= AWAY_MS) {
@@ -1012,6 +1022,7 @@ const byModel = (d: ProjDay) => {
     t.cacheWrite += m.cacheWrite
     t.cacheRead += m.cacheRead
     t.output += m.output
+    t.time += m.time
     out.set(name, t)
   }
   return [...out].sort((a, b) => b[1].usd - a[1].usd)
@@ -1079,7 +1090,8 @@ async function coutsText($: EngineInterface) {
         money(m.usd).padStart(w.usd),
         pctOf(m.usd, d.usd).padStart(4),
         `${perHour(m.usd, d.work)} $/h`,
-        `entrée ${fmtTok(m.input)} · écriture cache ${fmtTok(m.cacheWrite)} · lecture cache ${fmtTok(m.cacheRead)} · sortie ${fmtTok(m.output)}`,
+        `entrée ${fmtTok(m.input)} · écriture cache ${fmtTok(m.cacheWrite)} · lecture cache ${fmtTok(m.cacheRead)} · sortie ${fmtTok(m.output)}` +
+          (m.time > 0 ? ` · temps ${fmtWork(m.time)}` : ''),
       ].join('  '),
     )
   out.push(line(rows[0] as ProjRow))
@@ -1851,6 +1863,8 @@ export const register: Register = on => {
     } finally {
       const l = e.agentId ?? ''
       loops.delete(l)
+      // A subagent's loop ends for good; the main one keeps its model for the next turn.
+      if (l) loopModel.delete(l)
       for (const [id, of] of asks) if (of === l) asks.delete(id)
       // Claude is done: a sound, off the hook (the player takes a moment).
       if (e.agentId === undefined && !e.isAborted) void playDone($).catch(() => undefined)
@@ -1877,6 +1891,8 @@ export const register: Register = on => {
   // each response (subagents' too) how many tokens it used.
   // Pass-through: the stream is forwarded untouched.
   on('turn.step', async function* ($, e, next) {
+    // The request's model, from its start: its loop's time goes to it.
+    if (e.model) loopModel.set(e.agentId ?? '', e.model)
     if (e.agentId === undefined && e.effort !== undefined) stepEffort = String(e.effort)
     const agentId = e.agentId
     if (agentId !== undefined && e.effort !== undefined) {
@@ -2132,31 +2148,50 @@ export const register: Register = on => {
             {sectionTitle('project', 'Projet', `${money(t.usd)} · ${perHour(t.usd, t.work)} $/h travail`)}
           </Box>
         )
-      // A model's line ends with its part of the span's cost.
-      type Line = { label: string; usd: string; work: string; rate: string; pct: string }
+      // A model's line ends with three columns, titled once on top: its part of
+      // the span's cost, its part of the span's tokens (cache reads left out, as
+      // tok/min), and its own time at work.
+      type Line = { label: string; usd: string; work: string; rate: string; pct: string; tok: string; time: string }
       const rate = (usd: number, ms: number) => {
         const r = perHour(usd, ms)
         return r === '–' ? r : `${r} $/h`
       }
+      const tokensOf = (m: ProjDay['models'][string]) => m.input + m.cacheWrite + m.output
       const spans: [string, ProjDay][] = [
         ['séance', pv.session],
         [pv.weekReset ? 'depuis ↻ 7j' : '7 derniers j', pv.week],
         ['total', t],
       ]
-      const blocks = spans.map(([label, d]) => ({
-        head: { label, usd: money(d.usd), work: fmtWork(d.work), rate: rate(d.usd, d.work), pct: '' } as Line,
-        models: byModel(d).map(
-          ([name, m]): Line => ({
-            label: `  ${name}`,
-            usd: money(m.usd),
-            work: '',
-            rate: rate(m.usd, d.work),
-            pct: pctOf(m.usd, d.usd),
-          }),
-        ),
-      }))
+      const blocks = spans.map(([label, d]) => {
+        const models = byModel(d)
+        const tokens = models.reduce((s, [, m]) => s + tokensOf(m), 0)
+        return {
+          head: { label, usd: money(d.usd), work: fmtWork(d.work), rate: rate(d.usd, d.work), pct: '', tok: '', time: '' } as Line,
+          models: models.map(
+            ([name, m]): Line => ({
+              label: `  ${name}`,
+              usd: money(m.usd),
+              work: '',
+              rate: rate(m.usd, d.work),
+              pct: pctOf(m.usd, d.usd),
+              tok: pctOf(tokensOf(m), tokens),
+              // counted since 0.20.0: none before
+              time: m.time > 0 ? fmtWork(m.time) : '–',
+            }),
+          ),
+        }
+      })
+      const TITLES = { pct: 'coût', tok: 'token', time: 'temps' } as const
       const all = blocks.flatMap(b => [b.head, ...b.models])
-      const w = (k: keyof Line) => Math.max(0, ...all.map(r => r[k].length))
+      const w = (k: keyof Line) =>
+        Math.max(k in TITLES ? TITLES[k as keyof typeof TITLES].length : 0, ...all.map(r => r[k].length))
+      const left = w('label') + 2 + w('usd') + 2 + w('work') + 2 + w('rate')
+      const titles = (
+        <Text key="proj-titles" wrap="truncate-end" color={C.dim}>
+          {' '.repeat(left)}
+          {`  ${TITLES.pct.padStart(w('pct'))}  ${TITLES.tok.padStart(w('tok'))}  ${TITLES.time.padStart(w('time'))}`}
+        </Text>
+      )
       const line = (r: Line, key: string, head: boolean) => (
         <Text key={key} wrap="truncate-end">
           <Text color={head ? C.text : C.accent} bold={head}>
@@ -2165,7 +2200,15 @@ export const register: Register = on => {
           <Text color={head ? C.accent : C.text} bold={head}>{`  ${r.usd.padStart(w('usd'))}`}</Text>
           <Text color={C.text}>{`  ${r.work.padStart(w('work'))}`}</Text>
           <Text color={C.sub}>{`  ${r.rate.padStart(w('rate'))}`}</Text>
-          {r.pct ? <Text color={C.text}>{`  ${r.pct.padStart(w('pct'))}`}</Text> : ''}
+          {head ? (
+            ''
+          ) : (
+            <Text>
+              <Text color={C.text}>{`  ${r.pct.padStart(w('pct'))}`}</Text>
+              <Text color={C.text}>{`  ${r.tok.padStart(w('tok'))}`}</Text>
+              <Text color={C.sub}>{`  ${r.time.padStart(w('time'))}`}</Text>
+            </Text>
+          )}
         </Text>
       )
       return (
@@ -2175,8 +2218,10 @@ export const register: Register = on => {
             'Projet',
             `${pv.since ? `commencé le ${sinceLabel(pv.since)} · ` : ''}coût estimé au prix de l'API`,
           )}
+          <Text key="proj-gap-top"> </Text>
+          {titles}
           {blocks.flatMap((b, i) => [
-            <Text key={`proj-gap-${i}`}> </Text>,
+            ...(i > 0 ? [<Text key={`proj-gap-${i}`}> </Text>] : []),
             line(b.head, `proj-${i}`, true),
             ...b.models.map((m, j) => line(m, `proj-${i}-${j}`, false)),
           ])}

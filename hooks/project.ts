@@ -22,7 +22,7 @@ const HOUR = 60 * MIN
 const DAY = 24 * HOUR
 
 export const emptyDay = (): ProjDay => ({ open: 0, work: 0, usd: 0, models: {} })
-export const emptyModel = (): ModelDay => ({ usd: 0, input: 0, cacheWrite: 0, cacheRead: 0, output: 0 })
+export const emptyModel = (): ModelDay => ({ usd: 0, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, time: 0 })
 
 const obj = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
@@ -42,6 +42,8 @@ export const toDay = (v: unknown): ProjDay => {
       cacheWrite: num(x.cacheWrite),
       cacheRead: num(x.cacheRead),
       output: num(x.output),
+      // absent before 0.20.0: 0
+      time: num(x.time),
     }
   }
   return d
@@ -101,6 +103,7 @@ export const addInto = (to: ProjDay, from: ProjDay) => {
     t.cacheWrite += m.cacheWrite
     t.cacheRead += m.cacheRead
     t.output += m.output
+    t.time += m.time
   }
 }
 
@@ -115,7 +118,14 @@ export const roundDay = (d: ProjDay): ProjDay => {
     models: Object.fromEntries(
       Object.entries(d.models).map(([id, m]) => [
         id,
-        { usd: u(m.usd), input: r(m.input), cacheWrite: r(m.cacheWrite), cacheRead: r(m.cacheRead), output: r(m.output) },
+        {
+          usd: u(m.usd),
+          input: r(m.input),
+          cacheWrite: r(m.cacheWrite),
+          cacheRead: r(m.cacheRead),
+          output: r(m.output),
+          time: r(m.time),
+        },
       ]),
     ),
   }
