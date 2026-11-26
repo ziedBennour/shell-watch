@@ -1473,24 +1473,41 @@ const BELLS: readonly string[] = ['terminal_bell', 'iterm2_with_bell']
 
 async function isRemote($: EngineInterface) {
   if (remote === undefined) {
-    const argv =
-      (await system($)) === 'Windows_NT'
-        ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', '"$env:SSH_CONNECTION$env:SSH_TTY"']
-        : ['sh', '-c', 'printf %s "$SSH_CONNECTION$SSH_TTY"']
-    const r = await $.process.run(argv).catch(() => null)
-    remote = !!r?.stdout.trim()
+    const conn = await $.env.get('SSH_CONNECTION').catch(() => undefined)
+    const tty = await $.env.get('SSH_TTY').catch(() => undefined)
+    remote = !!(conn?.trim() || tty?.trim())
   }
   return remote
 }
 
+// The relay (relais/son-relais.ps1) on the person's own computer, reached through
+// the SSH connection's `RemoteForward 127.0.0.1:47823 127.0.0.1:47823`: it plays
+// the sound chosen there. Nothing listening: the bell, as below.
+const RELAY_URL = 'http://127.0.0.1:47823/done'
+const RELAY_MS = 3000
+
+async function ringRelay($: EngineInterface) {
+  const timeout = $.clock.sleep(RELAY_MS).then(
+    () => false,
+    () => false,
+  )
+  const asked = $.http
+    .fetch(RELAY_URL, { method: 'POST' })
+    .then(r => r.ok)
+    .catch(() => false)
+  return Promise.race([asked, timeout])
+}
+
 async function ringRemote($: EngineInterface) {
+  if (await ringRelay($)) return
   const r = await $.ui.notify('Travail terminé', { title: 'Claude Code' }).catch(() => null)
   if (r?.isSent && BELLS.includes(r.channel)) return
   if (remoteHinted) return
   remoteHinted = true
   $.ui.log(
-    'shell-watch : session SSH, le son ne peut pas jouer sur cette machine : il passe par la cloche de ton terminal. ' +
-      'Pour l\'entendre : /config → Notifications → terminal_bell, puis dans ton terminal le son de cloche (Windows Terminal : bellSound du profil).',
+    'shell-watch : session SSH, le son ne peut pas jouer sur cette machine. Pour l\'entendre sur ton ordinateur : ' +
+      'le relais relais/son-relais.ps1 et RemoteForward 127.0.0.1:47823 127.0.0.1:47823 dans ~/.ssh/config (voir le README), ' +
+      'ou la cloche du terminal : /config → Notifications → terminal_bell.',
   )
 }
 

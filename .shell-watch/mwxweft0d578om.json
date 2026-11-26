@@ -4,6 +4,6 @@
   "entries": [
     {"day":"2026-11-26","from":["mwxpjdgbfqslax"],"rec":{"open":10797961,"work":2057961,"usd":5.36377,"models":{"claude-opus-5-5":{"usd":5.36377,"input":120,"cacheWrite":324824,"cacheRead":7651821,"output":49498}}}},
     {"day":"2026-11-26","from":["mwxw0bh3uj9tfy"],"rec":{"open":1290038,"work":1290038,"usd":4.296291,"models":{"claude-opus-5-5":{"usd":4.296291,"input":182,"cacheWrite":128208,"cacheRead":9657269,"output":55576}}}},
-    {"day":"2026-11-26","from":["mwxwscuq6ehn6q"],"rec":{"open":6285534,"work":2524156,"usd":7.979903,"models":{"claude-opus-5-5":{"usd":7.979903,"input":318,"cacheWrite":311772,"cacheRead":17289673,"output":82478}}}}
+    {"day":"2026-11-26","from":["mwxwscuq6ehn6q"],"rec":{"open":6678189,"work":2916811,"usd":10.094603,"models":{"claude-opus-5-5":{"usd":10.094603,"input":380,"cacheWrite":344008,"cacheRead":23861155,"output":106927}}}}
   ]
 }

@@ -1,3 +1,4 @@
+import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
@@ -14,13 +15,15 @@ const PANE = {
   },
 } as const
 
+const RUN_OK = { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+const MACHINE = { release: '10', machine: 'x86_64', packageManagers: [], runtimes: [] }
+
 test('the button turns the sound off, then on', async ($, on) => {
   mock.store(on)
+  mock.env(on, {})
   // The player is not run: the sound it would play, turned back on, is answered at once.
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
-  on('session.machine', () => ({
-    value: { sysname: 'Windows_NT', release: '10', machine: 'x86_64', packageManagers: [], runtimes: [] },
-  }))
+  on('process.run', () => ({ value: RUN_OK }))
+  on('session.machine', () => ({ value: { sysname: 'Windows_NT', ...MACHINE } }))
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /son activé/ }))?.text).toBe('♪ son activé')
@@ -32,27 +35,47 @@ test('the button turns the sound off, then on', async ($, on) => {
   }
 })
 
-test('over SSH the terminal rings, no player is run on the machine', async ($, on) => {
+/** A session opened over SSH on Linux; `relay` says whether the relay on the person's computer answers. */
+function sshSession(on: On, relay: boolean) {
   mock.store(on)
-  const runs: string[] = []
+  mock.clock(on)
+  mock.env(on, { SSH_CONNECTION: '203.0.113.5 50000 10.0.0.1 22' })
+  const seen = { runs: [] as string[], rung: [] as string[], relayed: 0 }
   on('process.run', (_, e) => {
-    runs.push(e.argv[0] ?? '')
-    // The SSH variables, as a session opened over SSH has them.
-    const stdout = e.argv[0] === 'sh' ? '203.0.113.5 50000 10.0.0.1 22' : ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    seen.runs.push(e.argv[0] ?? '')
+    return { value: RUN_OK }
   })
-  on('session.machine', () => ({
-    value: { sysname: 'Linux', release: '6', machine: 'x86_64', packageManagers: [], runtimes: [] },
-  }))
-  const rung: string[] = []
+  on('session.machine', () => ({ value: { sysname: 'Linux', ...MACHINE } }))
+  on('http.fetch', (_, e) => {
+    seen.relayed++
+    expect(e.url).toBe('http://127.0.0.1:47823/done')
+    return relay ? { value: { status: 204, ok: true, headers: {}, text: '' } } : { deny: 'connection refused' }
+  })
   on('ui.notify', (_, e) => {
-    rung.push(e.text)
+    seen.rung.push(e.text)
     return { value: { isSent: true, channel: 'terminal_bell' } }
   })
+  return seen
+}
+
+test('over SSH the relay on the person computer plays it: no bell, no player here', async ($, on) => {
+  const seen = sshSession(on, true)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'sound' })
   await ui.press({ key: 'sound' })
-  expect(rung).toEqual(['Travail terminé'])
-  expect(runs.includes('paplay')).toBe(false)
+  expect(seen.relayed).toBe(1)
+  expect(seen.rung).toEqual([])
+  expect(seen.runs).toEqual([])
+  await ui.unmount()
+})
+
+test('over SSH with no relay the terminal rings, no player is run on the machine', async ($, on) => {
+  const seen = sshSession(on, false)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'sound' })
+  await ui.press({ key: 'sound' })
+  expect(seen.relayed).toBe(1)
+  expect(seen.rung).toEqual(['Travail terminé'])
+  expect(seen.runs).toEqual([])
   await ui.unmount()
 })

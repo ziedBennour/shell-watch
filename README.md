@@ -194,11 +194,21 @@ son de notification du système : celui de Windows (`Windows Notify System Gener
 
 Le choix est gardé d'une session à l'autre. Sous Linux, un mp3 passe par `ffplay`.
 
-**Sur une machine distante (SSH, un VPS)**, le son joué là-bas ne s'entendrait pas : le mod
-fait sonner ton terminal à la place, par la notification de Claude Code, que SSH ramène. Pour
-qu'elle sonne : `/config` → Notifications → `terminal_bell` (sur la machine distante), puis le
-son de cloche de ton terminal ; Windows Terminal le prend dans `bellSound` du profil, un
-fichier wav ou mp3 à toi.
+**Sur une machine distante (SSH, un VPS, VS Code Remote-SSH)**, le son joué là-bas ne
+s'entendrait pas. Le mod demande alors à ton ordinateur de le jouer :
+
+1. **Le relais** (Windows) : `relais/son-relais.ps1` écoute sur ton ordinateur seul
+   (`127.0.0.1:47823`) et joue le son choisi par `/son` sur cet ordinateur. Copie-le, par exemple
+   dans `%LOCALAPPDATA%\shell-watch\`, et lance-le au démarrage de Windows (un raccourci dans
+   `shell:startup` vers `powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File
+   ...\son-relais.ps1`).
+2. **Le tunnel** : dans `~/.ssh/config`, sous le `Host` de la machine distante,
+   `RemoteForward 127.0.0.1:47823 127.0.0.1:47823`. VS Code Remote-SSH le lit aussi ;
+   reconnecte-toi après l'avoir ajouté.
+
+Sans relais qui répond, le mod fait sonner ton terminal par la notification de Claude Code, que
+SSH ramène : `/config` → Notifications → `terminal_bell` sur la machine distante, puis le son de
+cloche de ton terminal (Windows Terminal : `bellSound` du profil ; VS Code : son propre son).
 
 ## Où sont les données
 
