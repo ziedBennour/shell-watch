@@ -130,6 +130,13 @@ Sur chaque ligne :
 `/couts` donne le détail jour par jour, chaque modèle avec ses quatre types de tokens
 (entrée, écriture du cache, lecture du cache, sortie).
 
+Une session compte pour le dossier où elle a démarré. Le travail fait sur un projet depuis
+un autre dossier (une session lancée sur le Bureau) se rattache à la main :
+`/projet-rattacher` liste les dossiers qui ont un coût compté, et
+`/projet-rattacher <dossier>` (son chemin, ou son nom s'il est le seul à le porter)
+déplace tout ce que ce dossier a compté vers le projet de la session. Une session encore
+ouverte dans ce dossier bloque le déplacement : il faut la fermer avant.
+
 ### Agents
 
 N'apparaît qu'une fois qu'un sous-agent a été lancé dans la session.

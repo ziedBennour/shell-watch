@@ -28,13 +28,17 @@ import {
   emptyModel,
   entryDays,
   firstDay,
+  folderKey,
   foreignEntries,
   gitFileText,
   hourKey,
   keptHours,
   localEntries,
   mergeArchive,
+  mergeArchives,
   mergeDays,
+  mergeProc,
+  parseProjKey,
   planCompaction,
   roundArchive,
   roundDay,
@@ -1084,6 +1088,104 @@ async function coutsText($: EngineInterface) {
   return out.join('\n')
 }
 
+// A process key written this recently belongs to a session still open (it
+// writes each minute): moving it would have that session write it back.
+const LIVE_MS = 10 * MIN
+
+type Folder = { archive?: string; procs: { key: string; pid: string }[] }
+
+/** The folders but the project's that the store holds records for, each with its keys. */
+async function otherFolders($: EngineInterface, p: Proj) {
+  const out = new Map<string, Folder>()
+  for (const key of await $.store.keys()) {
+    const k = parseProjKey(key)
+    if (!k || k.root === p.root) continue
+    const f = out.get(k.root) ?? { procs: [] }
+    if (k.pid) f.procs.push({ key, pid: k.pid })
+    else f.archive = key
+    out.set(k.root, f)
+  }
+  return out
+}
+
+/** A folder's records as stored: its archive, its processes. */
+async function readFolder($: EngineInterface, f: Folder) {
+  const archive = toArchive(f.archive ? await $.store.get(f.archive) : undefined)
+  const procs: { key: string; pid: string; rec: ProcRec }[] = []
+  for (const x of f.procs) procs.push({ ...x, rec: toProc(await $.store.get(x.key)) })
+  const total = sumDays(mergeDays(archive, procs.map(x => [x.pid, x.rec.days] as const)))
+  const sessions = new Set([...Object.values(archive.days).flatMap(a => a.from), ...procs.map(x => x.pid)]).size
+  return { archive, procs, total, sessions }
+}
+
+const folderName = (root: string) => root.split(/[\\/]/).filter(Boolean).pop() ?? root
+const plural = (n: number, word: string) => `${n} ${word}${n > 1 ? 's' : ''}`
+
+/**
+ * /projet-rattacher: without a folder, those whose records can be moved into
+ * the project; with one (its path, or its name when it is the only one to
+ * bear it), moves them all.
+ */
+async function attachText($: EngineInterface, args: string) {
+  const p = proj
+  if (!p) return 'shell-watch : pas de projet pour cette session.'
+  const name = folderName(p.root)
+  const folders = await otherFolders($, p)
+  const want = folderKey(args)
+  if (!want) {
+    if (folders.size === 0) return `Aucun autre dossier n'a de coût compté : rien à rattacher à ${name}.`
+    const rows: { root: string; usd: number; line: string }[] = []
+    for (const [root, f] of folders) {
+      const r = await readFolder($, f)
+      rows.push({ root, usd: r.total.usd, line: `${money(r.total.usd)}  ${fmtWork(r.total.work)} de travail  ${plural(r.sessions, 'session')}` })
+    }
+    rows.sort((a, b) => b.usd - a.usd)
+    const w = Math.max(...rows.map(r => tilde(r.root).length))
+    return [
+      `Dossiers de démarrage dont le coût peut être rattaché au projet ${name} :`,
+      ...rows.map(r => `  ${tilde(r.root).padEnd(w)}  ${r.line}`),
+      '',
+      `/projet-rattacher <dossier> déplace tout ce qu'un dossier a compté vers ${name} : son chemin, ou son nom s'il est le seul à le porter.`,
+    ].join('\n')
+  }
+  if (want === folderKey(p.root) || want === folderKey(tilde(p.root))) return `${tilde(p.root)} est le dossier du projet lui-même.`
+  const roots = [...folders.keys()]
+  let found = roots.filter(r => folderKey(r) === want || folderKey(tilde(r)) === want)
+  if (found.length === 0) found = roots.filter(r => folderName(r).toLowerCase() === args.trim().toLowerCase())
+  if (found.length > 1) return `Plusieurs dossiers s'appellent « ${args.trim()} » : ${found.map(tilde).join(', ')}. Donne le chemin.`
+  const src = found[0]
+  const f = src === undefined ? undefined : folders.get(src)
+  if (src === undefined || !f) return `Aucun coût compté pour « ${args.trim()} ». /projet-rattacher seul liste les dossiers.`
+  const now = await $.clock.now()
+  const r = await readFolder($, f)
+  const live = r.procs.filter(x => x.rec.at > now - LIVE_MS)
+  if (live.length > 0)
+    return `Une session démarrée dans ${tilde(src)} est encore ouverte : ferme-la, puis relance /projet-rattacher ${args.trim()}.`
+  // The project's keys are written first, then the folder's deleted: a move
+  // cut short is finished by the next one.
+  if (Object.keys(r.archive.days).length > 0) {
+    const into = toArchive(await $.store.get(`${p.prefix}a`))
+    await $.store.set(`${p.prefix}a`, roundArchive(mergeArchives(into, r.archive)))
+  }
+  for (const x of r.procs) {
+    const key = procKey(p.prefix, x.pid)
+    const had = await $.store.get(key)
+    const rec = had === undefined ? x.rec : mergeProc(toProc(had), x.rec)
+    const round = (d: Record<string, ProjDay>) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, roundDay(v)]))
+    await $.store.set(key, { at: rec.at, days: round(rec.days), hours: round(rec.hours), sid: rec.sid, run: roundDay(rec.run) })
+  }
+  if (f.archive) await $.store.delete(f.archive)
+  for (const x of r.procs) await $.store.delete(x.key)
+  await syncProject($, now)
+  await publishProject($, now)
+  // That folder's own repository keeps what its commits carried: it still counts there.
+  const inRepo = (await $.fs.list(join(src, GIT_DIR)).catch(() => [])).some(e => e.kind === 'file' && e.name.endsWith('.json'))
+  return [
+    `Rattaché au projet ${name} : ce que ${tilde(src)} a compté, ${money(r.total.usd)} et ${fmtWork(r.total.work)} de travail (${plural(r.sessions, 'session')}).`,
+    ...(inRepo ? [`${join(tilde(src), GIT_DIR)} garde ce que ses commits ont emporté : ce dossier-là le compte encore.`] : []),
+  ].join('\n')
+}
+
 async function tickProject($: EngineInterface) {
   if (!proj) return
   const now = await $.clock.now()
@@ -1348,6 +1450,11 @@ export const register: Register = on => {
       name: 'couts',
       description: "This project's cost and work time, day by day and per model (estimate at API prices)",
     })
+    await $.command.register({
+      name: 'projet-rattacher',
+      description: "Move what a session started in another folder counted into this project (none: list those folders)",
+      argumentHint: '[dossier]',
+    })
     ensureTimer($)
     // Folded sections stay folded from one session to the next.
     await safe($, async () => {
@@ -1386,6 +1493,12 @@ export const register: Register = on => {
   on('command.run', { command: 'couts' }, async $ => {
     signal()
     const text = await coutsText($).catch((err: unknown) => `shell-watch : ${String(err)}`)
+    return { text, isTextDisplayOnly: true }
+  })
+
+  on('command.run', { command: 'projet-rattacher' }, async ($, e) => {
+    signal()
+    const text = await attachText($, e.args).catch((err: unknown) => `shell-watch : ${String(err)}`)
     return { text, isTextDisplayOnly: true }
   })
 

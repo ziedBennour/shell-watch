@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "machine": "mwxweft0d578om",
+  "entries": [
+    {"day":"2026-11-26","from":["mwxw0bh3uj9tfy"],"rec":{"open":657011,"work":657011,"usd":2.668123,"models":{"claude-opus-5-5":{"usd":2.668123,"input":118,"cacheWrite":99628,"cacheRead":5303773,"output":36773}}}}
+  ]
+}

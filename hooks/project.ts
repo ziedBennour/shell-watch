@@ -319,6 +319,60 @@ export const gitFileText = (machine: string, local: readonly GitEntry[], previou
   return `{\n  "v": 1,\n  "machine": ${JSON.stringify(machine)},\n  "entries": [\n${lines.join(',\n')}${lines.length ? '\n' : ''}  ]\n}\n`
 }
 
+// --- moving a folder's records into a project -----------------------------------
+//
+// A session counts for the folder it started in: work done on a project from
+// another folder (a session started on the Desktop) is moved into it by hand,
+// every process key and the archive of that folder under the project's prefix.
+// A move begun before and cut short is finished, not counted twice: each
+// (process, day) pair the project already holds stays as it is.
+
+/** A key of the Projet records: its folder, and its process (none: the folder's archive). */
+export const parseProjKey = (key: string): { root: string; pid?: string } | null => {
+  if (!key.startsWith('proj-1|')) return null
+  const rest = key.slice('proj-1|'.length)
+  if (rest.endsWith('|a')) return rest.length > 2 ? { root: rest.slice(0, -2) } : null
+  const m = /^(.+)\|p\|([^|]+)$/.exec(rest)
+  return m ? { root: m[1] as string, pid: m[2] as string } : null
+}
+
+/** A folder as typed or stored, to compare: quotes, separators, a trailing one and, on Windows, case set aside. */
+export const folderKey = (path: string) => {
+  const p = path
+    .trim()
+    .replace(/^(["'])(.*)\1$/, '$2')
+    .replace(/[\\/]+/g, '/')
+    .replace(/(.)\/$/, '$1')
+  return /^[A-Za-z]:/.test(p) || p.startsWith('~') ? p.toLowerCase() : p
+}
+
+/** A process's record moved onto the one already there: the days and hours it lacks. */
+export const mergeProc = (into: ProcRec, from: ProcRec): ProcRec => ({
+  at: Math.max(into.at, from.at),
+  days: { ...from.days, ...into.days },
+  hours: { ...from.hours, ...into.hours },
+  sid: into.sid || from.sid,
+  run: into.sid ? into.run : from.run,
+})
+
+/** An archive moved onto another: each day with the processes it does not hold yet. */
+export const mergeArchives = (into: Archive, from: Archive): Archive => {
+  const out: Archive = { days: {} }
+  for (const [day, a] of Object.entries(into.days)) {
+    const rec = emptyDay()
+    addInto(rec, a.rec)
+    out.days[day] = { from: [...a.from], rec }
+  }
+  for (const [day, a] of Object.entries(from.days)) {
+    const fresh = a.from.filter(pid => !out.days[day]?.from.includes(pid))
+    if (fresh.length === 0) continue
+    const t = (out.days[day] ??= { from: [], rec: emptyDay() })
+    addInto(t.rec, a.rec)
+    t.from.push(...fresh)
+  }
+  return out
+}
+
 /** The first day with something counted: "2026-10-30", '' for none. */
 export const firstDay = (days: ReadonlyMap<string, ProjDay>) =>
   [...days].filter(([, d]) => d.usd > 0 || d.open > 0).map(([k]) => k).sort()[0] ?? ''
